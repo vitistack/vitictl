@@ -149,6 +149,18 @@ viti kc login <name> -o ./out
 # Provider-native dashboard. Talos → talosctl dashboard against the
 # control planes with a temporary talosconfig (no prior `login` needed).
 viti kc console <name> [--az zone] [-n namespace] [--endpoint <addr>...]
+
+# Take an etcd snapshot. -o is required: a directory gets the default
+# filename appended ("etcd-backup-<clusterId>.snapshot"), anything else is
+# used as the literal file path. --copy-raw uses the unhealthy-cluster
+# fallback (talosctl cp /var/lib/etcd/member/snap/db).
+viti kc etcd-backup <name> -o ./backups/ [--node <addr>] [--endpoint <addr>...]
+viti kc etcd-backup <name> -o ./snap.bin --copy-raw
+
+# Restore etcd from a snapshot (DESTRUCTIVE — see Talos disaster-recovery
+# preconditions). Adds --recover-skip-hash-check via --skip-hash-check
+# when the snapshot was taken with --copy-raw.
+viti kc etcd-restore <name> --from ./snap.bin [--node <addr>] [--yes] [--skip-hash-check]
 ```
 
 ### Machines (alias: `m`) — dashboard

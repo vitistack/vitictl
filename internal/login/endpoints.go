@@ -95,13 +95,22 @@ func cpvipEndpoints(ctx context.Context, c ctrlclient.Client, namespace, cluster
 		return nil, fmt.Sprintf("multiple CPVIPs match clusterId %s: %s (using first)", clusterID, strings.Join(names, ", ")), nil
 	}
 	cpvip := matched[0]
-	if len(cpvip.Status.PoolMembers) > 0 {
-		return cpvip.Status.PoolMembers, "", nil
+	// Combine the VIP(s) with the pool members so talosctl has multiple
+	// addresses to try (it walks --endpoints in order on failure). In
+	// split-horizon networks, either side can be unreachable from a
+	// given client, so offering both maximises the chance one works
+	// without the user having to pass --endpoint.
+	var addrs []string
+	addrs = append(addrs, cpvip.Status.LoadBalancerIps...)
+	addrs = append(addrs, cpvip.Status.PoolMembers...)
+	if len(addrs) == 0 {
+		addrs = append(addrs, cpvip.Spec.PoolMembers...)
+		if len(addrs) > 0 {
+			return dedupeKeepOrder(addrs), fmt.Sprintf("CPVIP %s has no status addresses yet; using spec.poolMembers", cpvip.Name), nil
+		}
+		return nil, fmt.Sprintf("CPVIP %s has no addresses populated", cpvip.Name), nil
 	}
-	if len(cpvip.Spec.PoolMembers) > 0 {
-		return cpvip.Spec.PoolMembers, fmt.Sprintf("CPVIP %s has no status.poolMembers yet; using spec.poolMembers", cpvip.Name), nil
-	}
-	return nil, fmt.Sprintf("CPVIP %s has no pool members populated", cpvip.Name), nil
+	return dedupeKeepOrder(addrs), "", nil
 }
 
 func controlPlaneMachineEndpoints(ctx context.Context, c ctrlclient.Client, namespace, clusterID string) ([]string, string, error) {
