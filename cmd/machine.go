@@ -33,6 +33,7 @@ var (
 
 type machineHit struct {
 	azName  string
+	client  *kube.Client
 	machine *vitiv1alpha1.Machine
 }
 
@@ -53,7 +54,7 @@ func collectMachines(
 			continue
 		}
 		for i := range list.Items {
-			hits = append(hits, machineHit{azName: c.AZ.Name, machine: &list.Items[i]})
+			hits = append(hits, machineHit{azName: c.AZ.Name, client: c, machine: &list.Items[i]})
 		}
 	}
 	return hits

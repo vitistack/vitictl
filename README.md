@@ -135,6 +135,28 @@ viti kc list -o yaml
 # Disambiguate with --az and/or -n/--namespace if the name exists on multiple
 # availability zones.
 viti kc get-config <name> [--az zone] [-n namespace] [-o ./out]
+
+# Install the cluster's kubeconfig + talosconfig as a <clusterId> context
+# in ~/.kube/config and ~/.talos/config. Endpoints for talosconfig are
+# resolved from the ControlPlaneVirtualSharedIP CR (or the -ctp machines)
+# by default; use --endpoint-from secret or --endpoint <addr> to override.
+viti kc login <name> [--az zone] [-n namespace] [--endpoint <addr>...] [--force] [--no-activate]
+
+# Write kubeconfig-<clusterId> / talosconfig-<clusterId> into a directory
+# instead of merging into your default configs:
+viti kc login <name> -o ./out
+
+# Provider-native dashboard. Talos → talosctl dashboard against the
+# control planes with a temporary talosconfig (no prior `login` needed).
+viti kc console <name> [--az zone] [-n namespace] [--endpoint <addr>...]
+```
+
+### Machines (alias: `m`) — dashboard
+
+```
+# Per-node Talos dashboard. The owning cluster is inferred from the
+# machine name (<clusterId>-ctp<N> / <clusterId>-wrk<N>).
+viti machine console <name> [--az zone] [-n namespace]
 ```
 
 ### Other CRDs
