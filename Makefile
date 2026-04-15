@@ -1,5 +1,6 @@
-BINARY := viti
-PKG    := github.com/vitistack/vitictl
+BINARY     := viti
+BINARY_GUI := viti-gui
+PKG        := github.com/vitistack/vitictl
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -83,13 +84,28 @@ lint-config: golangci-lint ## Verify golangci-lint configuration.
 build: fmt vet ## Build the viti binary into bin/$(BINARY).
 	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) .
 
+.PHONY: build-gui
+build-gui: fmt vet ## Build the viti-gui plugin binary into bin/$(BINARY_GUI).
+	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY_GUI) ./viti-gui
+
+.PHONY: build-all
+build-all: build build-gui ## Build both viti and viti-gui.
+
 .PHONY: run
 run: ## Run viti from source (pass args via ARGS=...).
 	go run . $(ARGS)
 
+.PHONY: run-gui
+run-gui: ## Run viti-gui from source.
+	go run ./viti-gui
+
 .PHONY: install
 install: ## Install viti to $GOBIN.
 	go install -ldflags "$(LDFLAGS)" .
+
+.PHONY: install-gui
+install-gui: ## Install viti-gui to $GOBIN.
+	go install -ldflags "$(LDFLAGS)" ./viti-gui
 
 .PHONY: clean
 clean: ## Remove build artifacts.

@@ -1,0 +1,40 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug viti (CLI)",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}",
+      "cwd": "${workspaceFolder}",
+      "debugAdapter": "dlv-dap",
+      "console": "integratedTerminal"
+      // To debug a specific subcommand, add e.g.:
+      //   "args": ["plugin", "list"]
+      // or:
+      //   "args": ["vitistack", "list", "-o", "yaml"]
+    },
+    {
+      "name": "Debug viti plugin list",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}",
+      "cwd": "${workspaceFolder}",
+      "debugAdapter": "dlv-dap",
+      "args": ["plugin", "list"],
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Debug viti-gui (TUI)",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/viti-gui",
+      "cwd": "${workspaceFolder}",
+      "debugAdapter": "dlv-dap",
+      "console": "integratedTerminal"
+    }
+  ]
+}

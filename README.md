@@ -7,6 +7,55 @@ with `-z/--availabilityzone` (or `--az`) to narrow to one.
 
 ## Install
 
+### One-liner (Linux / macOS)
+
+Downloads the latest release, verifies the SHA-256 checksum and (if
+[cosign](https://docs.sigstore.dev/cosign/installation/) is installed) the
+Sigstore keyless signature, then installs `viti` to `/usr/local/bin` (or
+`$HOME/.local/bin` when not root):
+
+```
+curl -fsSL https://raw.githubusercontent.com/vitistack/vitictl/main/install.sh | bash
+```
+
+Pin a specific version, install the `viti-gui` TUI plugin alongside, or
+change the install directory:
+
+```
+curl -fsSL https://raw.githubusercontent.com/vitistack/vitictl/main/install.sh | bash -s -- --version v0.2.0
+curl -fsSL https://raw.githubusercontent.com/vitistack/vitictl/main/install.sh | bash -s -- --with-gui
+curl -fsSL https://raw.githubusercontent.com/vitistack/vitictl/main/install.sh | bash -s -- --prefix "$HOME/.local/bin"
+```
+
+Run `./install.sh --help` for all flags (including `--skip-cosign` and
+`--skip-checksum`).
+
+### One-liner (Windows, PowerShell)
+
+Installs `viti.exe` to `%LOCALAPPDATA%\Programs\viti` and appends that
+directory to the user `PATH` (open a new terminal after install). SHA-256
+is always verified; cosign signature is verified if `cosign.exe` is on
+`PATH`.
+
+```powershell
+irm https://raw.githubusercontent.com/vitistack/vitictl/main/install.ps1 | iex
+```
+
+Pin a version, install the `viti-gui` TUI plugin alongside, or override the
+install prefix:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/vitistack/vitictl/main/install.ps1))) -Version v0.2.0
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/vitistack/vitictl/main/install.ps1))) -WithGui
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/vitistack/vitictl/main/install.ps1))) -Prefix "$env:USERPROFILE\bin"
+```
+
+Available parameters: `-Version`, `-Prefix`, `-WithGui`, `-SkipCosign`,
+`-SkipChecksum`, `-NoPathUpdate`. See `Get-Help .\install.ps1 -Full` after
+downloading.
+
+### From source
+
 ```
 make install
 ```
@@ -120,12 +169,38 @@ my-nc -n my-ns -o yaml`.
 - `kubeconfig` (from the `kube.config` key)
 - `info.txt` with every other key in the cluster secret
 
+## TUI (`viti gui`)
+
+`viti-gui` is a terminal UI shipped as a plugin. Install it with `--with-gui`
+(`-WithGui` on Windows) or run `make build-gui` from source, then invoke:
+
+```
+viti gui
+```
+
+The first menu entry, **Secrets**, lists every `KubernetesCluster` across your
+configured availability zones. Type to fuzzy-search, arrow keys to pick,
+Enter to open. On the detail view you can walk the secret's keys (↑/↓),
+toggle base64 decoding of the current value (`b`), or show every key at once
+(`a`). Esc backs out to the picker or the menu; `q` quits.
+
+## Extensions / plugins
+
+Any executable on `PATH` whose basename begins with `viti-` is exposed as a
+subcommand: `viti-foo` on `PATH` becomes `viti foo [args...]`. Run
+`viti plugin list` to see what is available and whether anything is shadowed
+by a built-in command. Plugins inherit `VITI_AVAILABILITYZONE` and
+`VITI_CONFIG` in their environment so they can read viti's global state
+without reparsing flags.
+
 ## Make targets
 
 `make help` prints the full list. Key targets:
 
 - `make build` — build `bin/viti`
-- `make install` — `go install` to `$GOBIN`
+- `make build-gui` — build `bin/viti-gui` (termui TUI plugin)
+- `make build-all` — build both binaries
+- `make install` / `make install-gui` — `go install` to `$GOBIN`
 - `make test`, `make lint`, `make lint-fix`
 - `make gosec`, `make govulncheck` — security scans (install tools into `./bin/`)
 - `make sbom` — generate CycloneDX + SPDX SBOMs into `./sbom/`

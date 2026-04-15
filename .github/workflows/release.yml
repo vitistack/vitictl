@@ -55,19 +55,33 @@ jobs:
         id: names
         run: |
           BIN="viti"
+          BIN_GUI="viti-gui"
           if [ "${{ matrix.goos }}" = "windows" ]; then
             BIN="viti.exe"
+            BIN_GUI="viti-gui.exe"
           fi
           ASSET="viti-${GITHUB_REF_NAME}-${{ matrix.goos }}-${{ matrix.goarch }}"
-          echo "bin=$BIN" >> "$GITHUB_OUTPUT"
-          echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
+          ASSET_GUI="viti-gui-${GITHUB_REF_NAME}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          {
+            echo "bin=$BIN"
+            echo "bin_gui=$BIN_GUI"
+            echo "asset=$ASSET"
+            echo "asset_gui=$ASSET_GUI"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Build
+      - name: Build viti
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           VERSION: ${{ github.ref_name }}
         run: make build BINARY=${{ steps.names.outputs.bin }}
+
+      - name: Build viti-gui
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ github.ref_name }}
+        run: make build-gui BINARY_GUI=${{ steps.names.outputs.bin_gui }}
 
       - name: Stage archive contents
         run: |
@@ -75,19 +89,29 @@ jobs:
           cp bin/${{ steps.names.outputs.bin }} dist/${{ steps.names.outputs.asset }}/
           cp README.md LICENSE dist/${{ steps.names.outputs.asset }}/
 
+          mkdir -p dist/${{ steps.names.outputs.asset_gui }}
+          cp bin/${{ steps.names.outputs.bin_gui }} dist/${{ steps.names.outputs.asset_gui }}/
+          cp README.md LICENSE dist/${{ steps.names.outputs.asset_gui }}/
+
       - name: Package (tar.gz)
         if: matrix.archive == 'tar.gz'
         working-directory: dist
-        run: tar -czf ${{ steps.names.outputs.asset }}.tar.gz ${{ steps.names.outputs.asset }}
+        run: |
+          tar -czf ${{ steps.names.outputs.asset }}.tar.gz ${{ steps.names.outputs.asset }}
+          tar -czf ${{ steps.names.outputs.asset_gui }}.tar.gz ${{ steps.names.outputs.asset_gui }}
 
       - name: Package (zip)
         if: matrix.archive == 'zip'
         working-directory: dist
-        run: zip -r ${{ steps.names.outputs.asset }}.zip ${{ steps.names.outputs.asset }}
+        run: |
+          zip -r ${{ steps.names.outputs.asset }}.zip ${{ steps.names.outputs.asset }}
+          zip -r ${{ steps.names.outputs.asset_gui }}.zip ${{ steps.names.outputs.asset_gui }}
 
       - name: Compute SHA-256 checksum
         working-directory: dist
-        run: sha256sum ${{ steps.names.outputs.asset }}.${{ matrix.archive }} > ${{ steps.names.outputs.asset }}.${{ matrix.archive }}.sha256
+        run: |
+          sha256sum ${{ steps.names.outputs.asset }}.${{ matrix.archive }}     > ${{ steps.names.outputs.asset }}.${{ matrix.archive }}.sha256
+          sha256sum ${{ steps.names.outputs.asset_gui }}.${{ matrix.archive }} > ${{ steps.names.outputs.asset_gui }}.${{ matrix.archive }}.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -96,6 +120,8 @@ jobs:
           path: |
             dist/${{ steps.names.outputs.asset }}.${{ matrix.archive }}
             dist/${{ steps.names.outputs.asset }}.${{ matrix.archive }}.sha256
+            dist/${{ steps.names.outputs.asset_gui }}.${{ matrix.archive }}
+            dist/${{ steps.names.outputs.asset_gui }}.${{ matrix.archive }}.sha256
           if-no-files-found: error
           retention-days: 1
 

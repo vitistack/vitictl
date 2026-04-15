@@ -29,6 +29,12 @@ clusters): configure one or more kubeconfig/context availability zones in
 func AvailabilityZone() string { return globalAZ }
 
 func Execute() error {
+	if handled, err := maybeDispatchPlugin(); handled {
+		if err != nil {
+			_, _ = fmt.Fprintln(rootCmd.ErrOrStderr(), "❌ Error:", err)
+		}
+		return err
+	}
 	if err := rootCmd.Execute(); err != nil {
 		_, _ = fmt.Fprintln(rootCmd.ErrOrStderr(), "❌ Error:", err)
 		return err
