@@ -23,6 +23,7 @@ var (
 	kcLoginContextName  string
 	kcLoginForce        bool
 	kcLoginNoActivate   bool
+	kcLoginUseVIP       bool
 )
 
 var kcLoginCmd = &cobra.Command{
@@ -167,7 +168,7 @@ func doTalosconfig(cmd *cobra.Command, ctx context.Context, hit *kcHit, secret *
 		source = login.SourceSecret
 	default:
 		resolved, src, warnings, err := login.ResolveControlPlaneEndpoints(
-			ctx, hit.client.Ctrl, hit.cluster.Namespace, hit.cluster.Spec.Cluster.ClusterId,
+			ctx, hit.client.Ctrl, hit.cluster.Namespace, hit.cluster.Spec.Cluster.ClusterId, kcLoginUseVIP,
 		)
 		if err != nil {
 			return fmt.Errorf("resolving control-plane endpoints: %w", err)
@@ -226,6 +227,8 @@ func init() {
 	kcLoginCmd.Flags().StringVar(&kcLoginContextName, "context-name", "", "override the context name (default: clusterId)")
 	kcLoginCmd.Flags().BoolVar(&kcLoginForce, "force", false, "overwrite an existing context with the same name")
 	kcLoginCmd.Flags().BoolVar(&kcLoginNoActivate, "no-activate", false, "merge but do not change current-context")
+	kcLoginCmd.Flags().BoolVar(&kcLoginUseVIP, "use-vip", false,
+		"include the CPVIP load-balancer address(es) in the resolved talos endpoints (default: control-plane node IPs only)")
 
 	kubernetesClusterCmd.AddCommand(kcLoginCmd)
 }

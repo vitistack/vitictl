@@ -19,6 +19,7 @@ var (
 	machineConsoleNamespace string
 	machineConsoleEndpoints []string
 	machineConsoleNodes     []string
+	machineConsoleUseVIP    bool
 )
 
 // Machines are named <clusterId>-ctp<N> for control planes and
@@ -81,7 +82,7 @@ Override either side with --endpoint (repeatable) or --node (repeatable).`,
 		endpoints := machineConsoleEndpoints
 		if len(endpoints) == 0 {
 			resolved, src, warnings, rerr := login.ResolveControlPlaneEndpoints(
-				ctx, hit.client.Ctrl, owning.Namespace, clusterID,
+				ctx, hit.client.Ctrl, owning.Namespace, clusterID, machineConsoleUseVIP,
 			)
 			if rerr != nil {
 				return rerr
@@ -270,6 +271,8 @@ func init() {
 		"explicit Talos API endpoint (repeatable); default: the cluster's CPVIP pool")
 	machineConsoleCmd.Flags().StringArrayVar(&machineConsoleNodes, "node", nil,
 		"explicit target node address (repeatable); default: the machine's IP that intersects the endpoints")
+	machineConsoleCmd.Flags().BoolVar(&machineConsoleUseVIP, "use-vip", false,
+		"include the CPVIP load-balancer address(es) in the endpoint list (default: control-plane node IPs only)")
 
 	machineCmd.AddCommand(machineConsoleCmd)
 }

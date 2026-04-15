@@ -29,8 +29,16 @@ const ControlPlaneNameSuffix = "-ctp"
 
 // ResolveControlPlaneEndpoints tries, in order:
 //  1. the ControlPlaneVirtualSharedIP (CPVIP) matching the cluster — its
-//     status.poolMembers, then spec.poolMembers as a fallback;
+//     status.poolMembers, then spec.poolMembers as a fallback. When
+//     includeVIP is true the VIP(s) from status.loadBalancerIps are
+//     prepended to the result;
 //  2. Machine objects named <clusterId>-ctp* — their status.ipAddresses.
+//
+// The default (includeVIP=false) targets the control-plane nodes directly,
+// which is what most on-prem / tunnel-connected operators want: the VIP
+// adds a routing hop and can be unreachable from networks where the CP
+// node IPs are. Callers that explicitly want the load-balancer address
+// pass includeVIP=true.
 //
 // Returns the collected addresses, the source that was used, and any
 // warnings worth surfacing to the user. If nothing is found, returns
@@ -40,13 +48,14 @@ func ResolveControlPlaneEndpoints(
 	ctx context.Context,
 	c ctrlclient.Client,
 	namespace, clusterID string,
+	includeVIP bool,
 ) (addrs []string, source EndpointSource, warnings []string, err error) {
 	if clusterID == "" {
 		return nil, SourceNone, nil, fmt.Errorf("clusterId is empty")
 	}
 
 	// 1. CPVIP
-	cpvipAddrs, cpvipWarn, cerr := cpvipEndpoints(ctx, c, namespace, clusterID)
+	cpvipAddrs, cpvipWarn, cerr := cpvipEndpoints(ctx, c, namespace, clusterID, includeVIP)
 	if cerr != nil {
 		warnings = append(warnings, fmt.Sprintf("CPVIP lookup: %v", cerr))
 	}
@@ -71,7 +80,7 @@ func ResolveControlPlaneEndpoints(
 	return nil, SourceNone, warnings, nil
 }
 
-func cpvipEndpoints(ctx context.Context, c ctrlclient.Client, namespace, clusterID string) ([]string, string, error) {
+func cpvipEndpoints(ctx context.Context, c ctrlclient.Client, namespace, clusterID string, includeVIP bool) ([]string, string, error) {
 	var list vitiv1alpha1.ControlPlaneVirtualSharedIPList
 	if err := c.List(ctx, &list, ctrlclient.InNamespace(namespace)); err != nil {
 		return nil, "", fmt.Errorf("listing ControlPlaneVirtualSharedIPs: %w", err)
@@ -95,22 +104,23 @@ func cpvipEndpoints(ctx context.Context, c ctrlclient.Client, namespace, cluster
 		return nil, fmt.Sprintf("multiple CPVIPs match clusterId %s: %s (using first)", clusterID, strings.Join(names, ", ")), nil
 	}
 	cpvip := matched[0]
-	// Combine the VIP(s) with the pool members so talosctl has multiple
-	// addresses to try (it walks --endpoints in order on failure). In
-	// split-horizon networks, either side can be unreachable from a
-	// given client, so offering both maximises the chance one works
-	// without the user having to pass --endpoint.
+
 	var addrs []string
-	addrs = append(addrs, cpvip.Status.LoadBalancerIps...)
-	addrs = append(addrs, cpvip.Status.PoolMembers...)
-	if len(addrs) == 0 {
-		addrs = append(addrs, cpvip.Spec.PoolMembers...)
-		if len(addrs) > 0 {
-			return dedupeKeepOrder(addrs), fmt.Sprintf("CPVIP %s has no status addresses yet; using spec.poolMembers", cpvip.Name), nil
-		}
-		return nil, fmt.Sprintf("CPVIP %s has no addresses populated", cpvip.Name), nil
+	if includeVIP {
+		addrs = append(addrs, cpvip.Status.LoadBalancerIps...)
 	}
-	return dedupeKeepOrder(addrs), "", nil
+	addrs = append(addrs, cpvip.Status.PoolMembers...)
+	if len(addrs) > 0 {
+		return dedupeKeepOrder(addrs), "", nil
+	}
+	// Status empty — fall back to spec.poolMembers (desired state) so
+	// newly-provisioned clusters aren't unusable just because the CPVIP
+	// controller hasn't reconciled yet.
+	addrs = append(addrs, cpvip.Spec.PoolMembers...)
+	if len(addrs) > 0 {
+		return dedupeKeepOrder(addrs), fmt.Sprintf("CPVIP %s has no status addresses yet; using spec.poolMembers", cpvip.Name), nil
+	}
+	return nil, fmt.Sprintf("CPVIP %s has no addresses populated", cpvip.Name), nil
 }
 
 func controlPlaneMachineEndpoints(ctx context.Context, c ctrlclient.Client, namespace, clusterID string) ([]string, string, error) {
