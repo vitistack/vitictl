@@ -90,23 +90,43 @@ func Connect(ctx context.Context, az settings.AvailabilityZone) (*Client, error)
 // ConnectAll builds clients for every availability zone. If allowPartial is
 // true, a failing zone is reported to `warn` and skipped rather than
 // aborting.
+//
+// When zero zones succeed, the returned error is explicit that the failure
+// is in reaching the availability zones' Kubernetes APIs (not whatever
+// subcommand the caller was about to run), and points at the config file
+// so users can distinguish a connectivity problem from a bug in viti.
 func ConnectAll(ctx context.Context, zones []settings.AvailabilityZone, allowPartial bool, warn func(error)) ([]*Client, error) {
 	clients := make([]*Client, 0, len(zones))
+	var firstErr error
 	for _, z := range zones {
 		c, err := Connect(ctx, z)
 		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
 			if allowPartial {
 				if warn != nil {
-					warn(err)
+					warn(fmt.Errorf("availability-zone kubeconfig unreachable: %w", err))
 				}
 				continue
 			}
-			return nil, err
+			return nil, fmt.Errorf("availability-zone kubeconfig unreachable: %w", err)
 		}
 		clients = append(clients, c)
 	}
 	if len(clients) == 0 {
-		return nil, fmt.Errorf("no reachable availability zones (configured %d)", len(zones))
+		cfgPath, _ := settings.ConfigFilePath()
+		hint := cfgPath
+		if hint == "" {
+			hint = "~/.vitistack/ctl.config.yaml"
+		}
+		return nil, fmt.Errorf(
+			"cannot connect to any configured availability zone (0/%d reachable). "+
+				"This is a kubeconfig/network problem — the command did not run. "+
+				"Check %s and make sure the kubeconfig's server: URL is reachable from this machine. "+
+				"First zone error: %v",
+			len(zones), hint, firstErr,
+		)
 	}
 	return clients, nil
 }
