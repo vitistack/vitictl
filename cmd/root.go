@@ -28,6 +28,26 @@ clusters): configure one or more kubeconfig/context availability zones in
 // root command.
 func AvailabilityZone() string { return globalAZ }
 
+// SetVersion wires the binary's version string into cobra. Called once
+// from main() with the -ldflags-injected value. Powers both
+// `viti --version` and the `viti version` subcommand.
+func SetVersion(v string) {
+	if v == "" {
+		v = "dev"
+	}
+	rootCmd.Version = v
+	rootCmd.SetVersionTemplate("viti version {{.Version}}\n")
+}
+
+var versionCmd = &cobra.Command{
+	Use:   "version",
+	Short: "Print the viti version",
+	Args:  cobra.NoArgs,
+	Run: func(cmd *cobra.Command, _ []string) {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "viti version %s\n", rootCmd.Version)
+	},
+}
+
 func Execute() error {
 	if handled, err := maybeDispatchPlugin(); handled {
 		if err != nil {
@@ -51,6 +71,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&globalAZ, "az", "",
 		"alias for --availabilityzone")
 
+	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(vitistackCmd)
 	rootCmd.AddCommand(machineCmd)

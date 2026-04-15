@@ -8,7 +8,12 @@ import (
 	"github.com/vitistack/vitictl/internal/settings"
 )
 
+// version is overridden at build time via -ldflags "-X main.version=...".
+// The default lets `go run .` show something useful during development.
+var version = "dev"
+
 func main() {
+	cmd.SetVersion(version)
 	if err := settings.Init(); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to initialize settings: %v\n", err)
 		os.Exit(1)
