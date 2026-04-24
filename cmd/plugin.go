@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/vitistack/vitictl/internal/plugin"
+	"github.com/vitistack/vitictl/internal/pluginmgr"
 )
 
 var pluginCmd = &cobra.Command{
@@ -27,43 +28,88 @@ can cooperate without reparsing viti's flags:
   VITI_CONFIG            path to the active ctl.config.yaml`,
 }
 
+var listAvailable bool
+
 var pluginListCmd = &cobra.Command{
 	Use:     "list",
 	Aliases: []string{"ls"},
 	Short:   "List plugins discovered on PATH",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		found, err := plugin.List()
-		if err != nil {
-			return err
+		if listAvailable {
+			return listAvailablePlugins(cmd)
 		}
-		if len(found) == 0 {
-			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "No viti-* plugins found on PATH.")
-			return nil
-		}
-
-		builtins := builtinCommandNames()
-		seen := make(map[string]string)
-
-		tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-		_, _ = fmt.Fprintln(tw, "NAME\tPATH\tSTATUS")
-		for _, p := range found {
-			var notes []string
-			if prior, dup := seen[p.Name]; dup {
-				notes = append(notes, fmt.Sprintf("shadowed by %s", prior))
-			} else {
-				seen[p.Name] = p.Path
-			}
-			if builtins[p.Name] {
-				notes = append(notes, "shadowed by built-in command")
-			}
-			status := "ok"
-			if len(notes) > 0 {
-				status = strings.Join(notes, "; ")
-			}
-			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", p.Name, p.Path, status)
-		}
-		return tw.Flush()
+		return listInstalledPlugins(cmd)
 	},
+}
+
+func listInstalledPlugins(cmd *cobra.Command) error {
+	found, err := plugin.List()
+	if err != nil {
+		return err
+	}
+	if len(found) == 0 {
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(),
+			"No viti-* plugins found on PATH. Run `viti plugin list --available` to see installable plugins.")
+		return nil
+	}
+
+	// Map managed plugins by name so we can report their tracked version.
+	managed := map[string]*pluginmgr.State{}
+	if states, err := pluginmgr.ListStates(); err == nil {
+		for _, s := range states {
+			managed[s.Name] = s
+		}
+	}
+
+	builtins := builtinCommandNames()
+	seen := make(map[string]string)
+
+	tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "NAME\tVERSION\tPATH\tSTATUS")
+	for _, p := range found {
+		var notes []string
+		if prior, dup := seen[p.Name]; dup {
+			notes = append(notes, fmt.Sprintf("shadowed by %s", prior))
+		} else {
+			seen[p.Name] = p.Path
+		}
+		if builtins[p.Name] {
+			notes = append(notes, "shadowed by built-in command")
+		}
+		status := "ok"
+		if len(notes) > 0 {
+			status = strings.Join(notes, "; ")
+		}
+		version := "-"
+		if s, ok := managed[p.Name]; ok {
+			version = s.Version
+		}
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", p.Name, version, p.Path, status)
+	}
+	return tw.Flush()
+}
+
+func listAvailablePlugins(cmd *cobra.Command) error {
+	idx, err := pluginmgr.FetchIndex(cmd.Context())
+	if err != nil {
+		return fmt.Errorf("fetching plugin index: %w", err)
+	}
+	installed := map[string]*pluginmgr.State{}
+	if states, err := pluginmgr.ListStates(); err == nil {
+		for _, s := range states {
+			installed[s.Name] = s
+		}
+	}
+	tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "NAME\tREPO\tINSTALLED\tDESCRIPTION")
+	for _, e := range idx.Plugins {
+		ver := "-"
+		if s, ok := installed[e.Name]; ok {
+			ver = s.Version
+		}
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", e.Name, e.Repo, ver, e.Description)
+	}
+	return tw.Flush()
 }
 
 // builtinCommandNames returns the set of subcommand names (and aliases)
@@ -84,6 +130,8 @@ func builtinCommandNames() map[string]bool {
 }
 
 func init() {
+	pluginListCmd.Flags().BoolVar(&listAvailable, "available", false,
+		"list installable plugins from the curated index instead of installed ones")
 	pluginCmd.AddCommand(pluginListCmd)
 	rootCmd.AddCommand(pluginCmd)
 }

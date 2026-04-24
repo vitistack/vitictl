@@ -1,25 +1,30 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/vitistack/vitictl/internal/release"
 )
 
 var globalAZ string
 
-var rootCmd = &cobra.Command{
-	Use:   "viti",
-	Short: "🚀 Vitistack control CLI",
-	Long: `🚀 viti is a command-line tool for interacting with one or more
+const rootLongBase = `🚀 viti is a command-line tool for interacting with one or more
 Vitistack installations: inspecting vitistacks, searching for machines and
 Kubernetes clusters, and extracting cluster configuration artifacts.
 
 🌐 A Vitistack deployment may span several availability zones (Kubernetes
 clusters): configure one or more kubeconfig/context availability zones in
 ~/.vitistack/ctl.config.yaml and commands will iterate them. Use
--z/--availabilityzone (or --az) to restrict a command to a single zone.`,
+-z/--availabilityzone (or --az) to restrict a command to a single zone.`
+
+var rootCmd = &cobra.Command{
+	Use:           "viti",
+	Short:         "🚀 Vitistack control CLI",
+	Long:          rootLongBase,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 }
@@ -30,22 +35,60 @@ func AvailabilityZone() string { return globalAZ }
 
 // SetVersion wires the binary's version string into cobra. Called once
 // from main() with the -ldflags-injected value. Powers both
-// `viti --version` and the `viti version` subcommand.
+// `viti --version` and the `viti version` subcommand. The version is
+// also appended to the root command's Long description so it appears
+// at the top of `viti --help`.
 func SetVersion(v string) {
 	if v == "" {
 		v = "dev"
 	}
 	rootCmd.Version = v
 	rootCmd.SetVersionTemplate("viti version {{.Version}}\n")
+	rootCmd.Long = rootLongBase + "\n\nInstalled version: " + v
 }
+
+var versionCheck bool
 
 var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Print the viti version",
 	Args:  cobra.NoArgs,
-	Run: func(cmd *cobra.Command, _ []string) {
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "viti version %s\n", rootCmd.Version)
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		out := cmd.OutOrStdout()
+		_, _ = fmt.Fprintf(out, "viti version %s\n", rootCmd.Version)
+		if !versionCheck {
+			return nil
+		}
+		return printReleaseCheck(cmd.Context(), out, rootCmd.Version)
 	},
+}
+
+// printReleaseCheck queries GitHub for the latest release and reports
+// whether the locally installed build is up to date. A network failure
+// is reported but is not fatal — `viti version --check` should never
+// exit non-zero just because the user is offline.
+func printReleaseCheck(ctx context.Context, out io.Writer, local string) error {
+	latest, err := release.FetchLatest(ctx, release.Repo)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "⚠️  could not check for updates: %v\n", err)
+		return nil
+	}
+	status := release.Compare(local, latest.Tag)
+	switch status {
+	case release.StatusUpToDate:
+		_, _ = fmt.Fprintf(out, "✅ you are on the latest release (%s)\n", latest.Tag)
+	case release.StatusOutdated:
+		_, _ = fmt.Fprintf(out, "🆕 a newer release is available: %s (you have %s)\n", latest.Tag, local)
+		_, _ = fmt.Fprintf(out, "   release notes: %s\n", latest.URL)
+		_, _ = fmt.Fprintf(out, "   upgrade with:  %s\n", release.UpgradeHint())
+		_, _ = fmt.Fprintln(out, "   or run:        viti upgrade")
+	case release.StatusAhead:
+		_, _ = fmt.Fprintf(out, "🧪 your build (%s) is ahead of the latest release (%s)\n", local, latest.Tag)
+	case release.StatusDevelopment:
+		_, _ = fmt.Fprintf(out, "🛠  development build (%s); latest release is %s\n", local, latest.Tag)
+		_, _ = fmt.Fprintf(out, "   release notes: %s\n", latest.URL)
+	}
+	return nil
 }
 
 func Execute() error {
@@ -71,6 +114,8 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&globalAZ, "az", "",
 		"alias for --availabilityzone")
 
+	versionCmd.Flags().BoolVar(&versionCheck, "check", false,
+		"check GitHub for a newer release and print upgrade instructions")
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(vitistackCmd)
