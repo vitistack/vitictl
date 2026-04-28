@@ -12,7 +12,7 @@ require (
 	github.com/vitistack/common v0.8.59
 	k8s.io/api v0.35.4
 	k8s.io/apiextensions-apiserver v0.35.4
-	k8s.io/apimachinery v0.35.4
+	k8s.io/apimachinery v0.36.0
 	k8s.io/client-go v0.35.4
 	sigs.k8s.io/controller-runtime v0.23.3
 	sigs.k8s.io/yaml v1.6.0
@@ -66,7 +66,7 @@ require (
 	golang.org/x/term v0.42.0 // indirect
 	golang.org/x/text v0.36.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
+	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
 	k8s.io/kube-openapi v0.0.0-20260414162039-ec9c827d403f // indirect
