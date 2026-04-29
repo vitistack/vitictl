@@ -106,6 +106,18 @@ All resource commands accept `-z/--availabilityzone <name>` (or `--az
 
 All `list` and `search` commands print an `AZ` column by default.
 
+`list` and `search` also accept `-s/--sort <spec>` — a comma-separated
+list of columns, with a `-` prefix for descending order. Built-in keys are
+`name`, `az`, `age`, and (for namespaced resources) `namespace`; each CRD
+adds its own keys (e.g. `phase`, `provider`, `cluster-id`). Run a command
+with `--help` to see the available keys for that resource. On `search`,
+`--sort` overrides fuzzy ranking.
+
+```
+viti machine list --sort az,-age
+viti kc search prod -s phase,name
+```
+
 ### Vitistack
 
 ```
@@ -187,6 +199,7 @@ The remaining Vitistack CRDs share the same `list` / `get <name>` / `search
 | `networkconfiguration`       | `nc`                  | namespaced | 🌐    |
 | `controlplanevirtualsharedip`| `lb`, `cpvip`         | namespaced | 🧷    |
 | `etcdbackup`                 | `eb`                  | namespaced | 💾    |
+| `clusterstorage`             | `cls`                 | namespaced | 🗄️    |
 
 Example: `viti mp list -o wide`, `viti eb search prod`, `viti nc get
 my-nc -n my-ns -o yaml`.
@@ -213,8 +226,8 @@ viti gui
 ```
 
 The first menu entry, **Secrets**, lists every `KubernetesCluster` across your
-configured availability zones. Type to fuzzy-search, arrow keys to pick,
-Enter to open. On the detail view you can walk the secret's keys (↑/↓),
+configured availability zones. Type to fuzzy-search, arrow keys to pick
+(PgUp/PgDn to jump a page), Enter to open. On the detail view you can walk the secret's keys (↑/↓),
 toggle base64 decoding of the current value (`b`), or show every key at once
 (`a`). Esc backs out to the picker or the menu; `q` quits.
 
