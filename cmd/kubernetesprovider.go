@@ -37,4 +37,37 @@ var kubernetesProviderCmd = buildResourceCmd(resourceBinding[*vitiv1alpha1.Kuber
 	SearchLabel: func(az string, o *vitiv1alpha1.KubernetesProvider) string {
 		return strings.Join([]string{az, o.Name, o.Spec.DisplayName, o.Spec.ProviderType, o.Spec.Region, o.Spec.Version}, " ")
 	},
+	SortKeys: map[string]func(a, b *vitiv1alpha1.KubernetesProvider) int{
+		"display-name": func(a, b *vitiv1alpha1.KubernetesProvider) int {
+			return strings.Compare(a.Spec.DisplayName, b.Spec.DisplayName)
+		},
+		"type": func(a, b *vitiv1alpha1.KubernetesProvider) int {
+			return strings.Compare(a.Spec.ProviderType, b.Spec.ProviderType)
+		},
+		"version": func(a, b *vitiv1alpha1.KubernetesProvider) int {
+			return strings.Compare(a.Spec.Version, b.Spec.Version)
+		},
+		"region": func(a, b *vitiv1alpha1.KubernetesProvider) int { return strings.Compare(a.Spec.Region, b.Spec.Region) },
+		"phase": func(a, b *vitiv1alpha1.KubernetesProvider) int {
+			return strings.Compare(a.Status.Phase, b.Status.Phase)
+		},
+		"nodes": func(a, b *vitiv1alpha1.KubernetesProvider) int {
+			switch {
+			case a.Status.NodeCount < b.Status.NodeCount:
+				return -1
+			case a.Status.NodeCount > b.Status.NodeCount:
+				return 1
+			}
+			return 0
+		},
+		"ready": func(a, b *vitiv1alpha1.KubernetesProvider) int {
+			switch {
+			case a.Status.ReadyNodeCount < b.Status.ReadyNodeCount:
+				return -1
+			case a.Status.ReadyNodeCount > b.Status.ReadyNodeCount:
+				return 1
+			}
+			return 0
+		},
+	},
 })

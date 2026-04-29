@@ -46,4 +46,52 @@ var etcdBackupCmd = buildResourceCmd(resourceBinding[*vitiv1alpha1.EtcdBackup, *
 	SearchLabel: func(az string, o *vitiv1alpha1.EtcdBackup) string {
 		return strings.Join([]string{az, o.Namespace, o.Name, o.Spec.ClusterName, o.Spec.StorageLocation.Type}, " ")
 	},
+	SortKeys: map[string]func(a, b *vitiv1alpha1.EtcdBackup) int{
+		"cluster": func(a, b *vitiv1alpha1.EtcdBackup) int {
+			return strings.Compare(a.Spec.ClusterName, b.Spec.ClusterName)
+		},
+		"storage": func(a, b *vitiv1alpha1.EtcdBackup) int {
+			return strings.Compare(a.Spec.StorageLocation.Type, b.Spec.StorageLocation.Type)
+		},
+		"schedule": func(a, b *vitiv1alpha1.EtcdBackup) int { return strings.Compare(a.Spec.Schedule, b.Spec.Schedule) },
+		"retention": func(a, b *vitiv1alpha1.EtcdBackup) int {
+			switch {
+			case a.Spec.Retention < b.Spec.Retention:
+				return -1
+			case a.Spec.Retention > b.Spec.Retention:
+				return 1
+			}
+			return 0
+		},
+		"phase": func(a, b *vitiv1alpha1.EtcdBackup) int { return strings.Compare(a.Status.Phase, b.Status.Phase) },
+		"count": func(a, b *vitiv1alpha1.EtcdBackup) int {
+			switch {
+			case a.Status.BackupCount < b.Status.BackupCount:
+				return -1
+			case a.Status.BackupCount > b.Status.BackupCount:
+				return 1
+			}
+			return 0
+		},
+		"size": func(a, b *vitiv1alpha1.EtcdBackup) int {
+			return strings.Compare(a.Status.BackupSize, b.Status.BackupSize)
+		},
+		"last-backup": func(a, b *vitiv1alpha1.EtcdBackup) int {
+			var ta, tb int64
+			if a.Status.LastBackupTime != nil {
+				ta = a.Status.LastBackupTime.Unix()
+			}
+			if b.Status.LastBackupTime != nil {
+				tb = b.Status.LastBackupTime.Unix()
+			}
+			// Most-recent first when ascending, mirroring how AGE sorts.
+			switch {
+			case ta > tb:
+				return -1
+			case ta < tb:
+				return 1
+			}
+			return 0
+		},
+	},
 })

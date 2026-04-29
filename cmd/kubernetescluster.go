@@ -26,10 +26,12 @@ var kubernetesClusterCmd = &cobra.Command{
 var (
 	kcListNamespace   string
 	kcListOutput      string
+	kcListSort        string
 	kcGetNamespace    string
 	kcGetOutput       string
 	kcSearchNamespace string
 	kcSearchOutput    string
+	kcSearchSort      string
 	kcConfigNamespace string
 	kcConfigOutputDir string
 )
@@ -37,6 +39,56 @@ var (
 type kcHit struct {
 	client  *kube.Client
 	cluster *vitiv1alpha1.KubernetesCluster
+}
+
+// kcComparators returns the sort comparators supported by KubernetesCluster
+// list/search. Defaults: az, namespace, name, age. Plus the values shown in
+// the table columns (cluster-id, provider, phase, region, env, datacenter,
+// version, cp-replicas).
+func kcComparators() map[string]func(a, b kcHit) int {
+	return map[string]func(a, b kcHit) int{
+		"az":        func(a, b kcHit) int { return cmpStrings(a.client.AZ.Name, b.client.AZ.Name) },
+		"namespace": func(a, b kcHit) int { return cmpStrings(a.cluster.Namespace, b.cluster.Namespace) },
+		"name":      func(a, b kcHit) int { return cmpStrings(a.cluster.Name, b.cluster.Name) },
+		"cluster-id": func(a, b kcHit) int {
+			return cmpStrings(a.cluster.Spec.Cluster.ClusterId, b.cluster.Spec.Cluster.ClusterId)
+		},
+		"provider": func(a, b kcHit) int {
+			return cmpStrings(string(a.cluster.Spec.Cluster.Provider), string(b.cluster.Spec.Cluster.Provider))
+		},
+		"phase":  func(a, b kcHit) int { return cmpStrings(a.cluster.Status.Phase, b.cluster.Status.Phase) },
+		"region": func(a, b kcHit) int { return cmpStrings(a.cluster.Spec.Cluster.Region, b.cluster.Spec.Cluster.Region) },
+		"env": func(a, b kcHit) int {
+			return cmpStrings(a.cluster.Spec.Cluster.Environment, b.cluster.Spec.Cluster.Environment)
+		},
+		"datacenter": func(a, b kcHit) int {
+			return cmpStrings(a.cluster.Spec.Cluster.Datacenter, b.cluster.Spec.Cluster.Datacenter)
+		},
+		"version": func(a, b kcHit) int {
+			return cmpStrings(a.cluster.Spec.Topology.Version, b.cluster.Spec.Topology.Version)
+		},
+		"cp-replicas": func(a, b kcHit) int {
+			ra, rb := a.cluster.Spec.Topology.ControlPlane.Replicas, b.cluster.Spec.Topology.ControlPlane.Replicas
+			switch {
+			case ra < rb:
+				return -1
+			case ra > rb:
+				return 1
+			}
+			return 0
+		},
+		"age": func(a, b kcHit) int {
+			ta := a.cluster.CreationTimestamp.Time
+			tb := b.cluster.CreationTimestamp.Time
+			if ta.Equal(tb) {
+				return 0
+			}
+			if ta.After(tb) {
+				return -1
+			}
+			return 1
+		},
+	}
 }
 
 func collectClusters(
@@ -80,6 +132,9 @@ var kcListCmd = &cobra.Command{
 			return err
 		}
 		hits := collectClusters(ctx, clients, kcListNamespace)
+		if err := sortByKeys(hits, kcListSort, kcComparators()); err != nil {
+			return err
+		}
 		if len(hits) == 0 && !format.IsStructured() {
 			fmt.Println("🤷 no kubernetesclusters found")
 			return nil
@@ -170,6 +225,9 @@ var kcSearchCmd = &cobra.Command{
 		hits := make([]kcHit, 0, len(matches))
 		for _, m := range matches {
 			hits = append(hits, m.Item)
+		}
+		if err := sortByKeys(hits, kcSearchSort, kcComparators()); err != nil {
+			return err
 		}
 		if len(hits) == 0 && !format.IsStructured() {
 			fmt.Println("🤷 no kubernetesclusters matched")
@@ -390,6 +448,7 @@ func init() {
 	kcListCmd.Flags().StringVarP(&kcListNamespace, "namespace", "n", "", "limit to this namespace")
 	kcListCmd.Flags().StringVarP(&kcListOutput, "output", "o", "",
 		"output format: wide, json, yaml, name (default: table)")
+	kcListCmd.Flags().StringVarP(&kcListSort, "sort", "s", "", sortFlagHelpFor(kcComparators()))
 
 	kcGetCmd.Flags().StringVarP(&kcGetNamespace, "namespace", "n", "", "namespace of the KubernetesCluster")
 	kcGetCmd.Flags().StringVarP(&kcGetOutput, "output", "o", "",
@@ -398,6 +457,7 @@ func init() {
 	kcSearchCmd.Flags().StringVarP(&kcSearchNamespace, "namespace", "n", "", "limit search to this namespace")
 	kcSearchCmd.Flags().StringVarP(&kcSearchOutput, "output", "o", "",
 		"output format: wide, json, yaml, name (default: table)")
+	kcSearchCmd.Flags().StringVarP(&kcSearchSort, "sort", "s", "", sortFlagHelpFor(kcComparators()))
 
 	kcGetConfigCmd.Flags().StringVarP(&kcConfigNamespace, "namespace", "n", "", "namespace of the KubernetesCluster")
 	kcGetConfigCmd.Flags().StringVarP(&kcConfigOutputDir, "output", "o", "", "output directory (default: ./<clusterId>)")

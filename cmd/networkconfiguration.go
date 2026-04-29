@@ -40,4 +40,34 @@ var networkConfigurationCmd = buildResourceCmd(resourceBinding[*vitiv1alpha1.Net
 	SearchLabel: func(az string, o *vitiv1alpha1.NetworkConfiguration) string {
 		return strings.Join([]string{az, o.Namespace, o.Name, o.Spec.Name, o.Spec.Provider, o.Spec.DatacenterIdentifier, o.Spec.ClusterIdentifier}, " ")
 	},
+	SortKeys: map[string]func(a, b *vitiv1alpha1.NetworkConfiguration) int{
+		"provider": func(a, b *vitiv1alpha1.NetworkConfiguration) int {
+			return strings.Compare(a.Spec.Provider, b.Spec.Provider)
+		},
+		"datacenter": func(a, b *vitiv1alpha1.NetworkConfiguration) int {
+			return strings.Compare(a.Spec.DatacenterIdentifier, b.Spec.DatacenterIdentifier)
+		},
+		"cluster": func(a, b *vitiv1alpha1.NetworkConfiguration) int {
+			return strings.Compare(a.Spec.ClusterIdentifier, b.Spec.ClusterIdentifier)
+		},
+		"nn": func(a, b *vitiv1alpha1.NetworkConfiguration) int {
+			return strings.Compare(a.Spec.NetworkNamespaceName, b.Spec.NetworkNamespaceName)
+		},
+		"ifaces": func(a, b *vitiv1alpha1.NetworkConfiguration) int {
+			la, lb := len(a.Spec.NetworkInterfaces), len(b.Spec.NetworkInterfaces)
+			switch {
+			case la < lb:
+				return -1
+			case la > lb:
+				return 1
+			}
+			return 0
+		},
+		"phase": func(a, b *vitiv1alpha1.NetworkConfiguration) int {
+			return strings.Compare(a.Status.Phase, b.Status.Phase)
+		},
+		"status": func(a, b *vitiv1alpha1.NetworkConfiguration) int {
+			return strings.Compare(a.Status.Status, b.Status.Status)
+		},
+	},
 })

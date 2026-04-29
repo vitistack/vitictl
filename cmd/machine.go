@@ -25,16 +25,73 @@ var machineCmd = &cobra.Command{
 var (
 	machineListNamespace   string
 	machineListOutput      string
+	machineListSort        string
 	machineGetNamespace    string
 	machineGetOutput       string
 	machineSearchNamespace string
 	machineSearchOutput    string
+	machineSearchSort      string
 )
 
 type machineHit struct {
 	azName  string
 	client  *kube.Client
 	machine *vitiv1alpha1.Machine
+}
+
+// machineComparators returns the sort comparators supported by Machine
+// list/search. Defaults: az, namespace, name, age. Plus the values shown in
+// the table columns (provider, phase, machine-id, hostname, arch, os, cpu,
+// memory).
+func machineComparators() map[string]func(a, b machineHit) int {
+	return map[string]func(a, b machineHit) int{
+		"az":        func(a, b machineHit) int { return cmpStrings(a.azName, b.azName) },
+		"namespace": func(a, b machineHit) int { return cmpStrings(a.machine.Namespace, b.machine.Namespace) },
+		"name":      func(a, b machineHit) int { return cmpStrings(a.machine.Name, b.machine.Name) },
+		"provider": func(a, b machineHit) int {
+			return cmpStrings(string(a.machine.Spec.Provider), string(b.machine.Spec.Provider))
+		},
+		"phase":      func(a, b machineHit) int { return cmpStrings(a.machine.Status.Phase, b.machine.Status.Phase) },
+		"machine-id": func(a, b machineHit) int { return cmpStrings(a.machine.Status.MachineID, b.machine.Status.MachineID) },
+		"hostname":   func(a, b machineHit) int { return cmpStrings(a.machine.Status.Hostname, b.machine.Status.Hostname) },
+		"arch": func(a, b machineHit) int {
+			return cmpStrings(a.machine.Status.Architecture, b.machine.Status.Architecture)
+		},
+		"os": func(a, b machineHit) int {
+			return cmpStrings(a.machine.Status.OperatingSystem, b.machine.Status.OperatingSystem)
+		},
+		"cpu": func(a, b machineHit) int {
+			ca, cb := a.machine.Spec.CPU.Cores, b.machine.Spec.CPU.Cores
+			switch {
+			case ca < cb:
+				return -1
+			case ca > cb:
+				return 1
+			}
+			return 0
+		},
+		"memory": func(a, b machineHit) int {
+			ma, mb := a.machine.Spec.Memory, b.machine.Spec.Memory
+			switch {
+			case ma < mb:
+				return -1
+			case ma > mb:
+				return 1
+			}
+			return 0
+		},
+		"age": func(a, b machineHit) int {
+			ta := a.machine.CreationTimestamp.Time
+			tb := b.machine.CreationTimestamp.Time
+			if ta.Equal(tb) {
+				return 0
+			}
+			if ta.After(tb) {
+				return -1
+			}
+			return 1
+		},
+	}
 }
 
 func collectMachines(
@@ -78,6 +135,9 @@ var machineListCmd = &cobra.Command{
 			return err
 		}
 		hits := collectMachines(ctx, clients, machineListNamespace)
+		if err := sortByKeys(hits, machineListSort, machineComparators()); err != nil {
+			return err
+		}
 		if len(hits) == 0 && !format.IsStructured() {
 			fmt.Println("🤷 no machines found")
 			return nil
@@ -166,6 +226,9 @@ var machineSearchCmd = &cobra.Command{
 		hits := make([]machineHit, 0, len(matches))
 		for _, m := range matches {
 			hits = append(hits, m.Item)
+		}
+		if err := sortByKeys(hits, machineSearchSort, machineComparators()); err != nil {
+			return err
 		}
 		if len(hits) == 0 && !format.IsStructured() {
 			fmt.Println("🤷 no machines matched")
@@ -326,6 +389,7 @@ func init() {
 	machineListCmd.Flags().StringVarP(&machineListNamespace, "namespace", "n", "", "limit to this namespace")
 	machineListCmd.Flags().StringVarP(&machineListOutput, "output", "o", "",
 		"output format: wide, json, yaml, name (default: table)")
+	machineListCmd.Flags().StringVarP(&machineListSort, "sort", "s", "", sortFlagHelpFor(machineComparators()))
 
 	machineGetCmd.Flags().StringVarP(&machineGetNamespace, "namespace", "n", "", "namespace of the Machine")
 	machineGetCmd.Flags().StringVarP(&machineGetOutput, "output", "o", "",
@@ -334,6 +398,7 @@ func init() {
 	machineSearchCmd.Flags().StringVarP(&machineSearchNamespace, "namespace", "n", "", "limit search to this namespace")
 	machineSearchCmd.Flags().StringVarP(&machineSearchOutput, "output", "o", "",
 		"output format: wide, json, yaml, name (default: table)")
+	machineSearchCmd.Flags().StringVarP(&machineSearchSort, "sort", "s", "", sortFlagHelpFor(machineComparators()))
 
 	machineCmd.AddCommand(machineListCmd, machineGetCmd, machineSearchCmd)
 }

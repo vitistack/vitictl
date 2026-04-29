@@ -37,4 +37,26 @@ var machineProviderCmd = buildResourceCmd(resourceBinding[*vitiv1alpha1.MachineP
 	SearchLabel: func(az string, o *vitiv1alpha1.MachineProvider) string {
 		return strings.Join([]string{az, o.Name, o.Spec.DisplayName, o.Spec.ProviderType, o.Spec.Region}, " ")
 	},
+	SortKeys: map[string]func(a, b *vitiv1alpha1.MachineProvider) int{
+		"display-name": func(a, b *vitiv1alpha1.MachineProvider) int {
+			return strings.Compare(a.Spec.DisplayName, b.Spec.DisplayName)
+		},
+		"type": func(a, b *vitiv1alpha1.MachineProvider) int {
+			return strings.Compare(a.Spec.ProviderType, b.Spec.ProviderType)
+		},
+		"region": func(a, b *vitiv1alpha1.MachineProvider) int { return strings.Compare(a.Spec.Region, b.Spec.Region) },
+		"phase":  func(a, b *vitiv1alpha1.MachineProvider) int { return strings.Compare(a.Status.Phase, b.Status.Phase) },
+		"active": func(a, b *vitiv1alpha1.MachineProvider) int {
+			switch {
+			case a.Status.ActiveMachines < b.Status.ActiveMachines:
+				return -1
+			case a.Status.ActiveMachines > b.Status.ActiveMachines:
+				return 1
+			}
+			return 0
+		},
+		"health": func(a, b *vitiv1alpha1.MachineProvider) int {
+			return strings.Compare(a.Status.Health.Status, b.Status.Health.Status)
+		},
+	},
 })

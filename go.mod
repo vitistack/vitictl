@@ -5,11 +5,12 @@ go 1.26.2
 godebug default=go1.26
 
 require (
+	github.com/atotto/clipboard v0.1.4
 	github.com/gizak/termui/v3 v3.1.0
 	github.com/sahilm/fuzzy v0.1.1
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
-	github.com/vitistack/common v0.8.59
+	github.com/vitistack/common v0.8.61
 	k8s.io/api v0.35.4
 	k8s.io/apiextensions-apiserver v0.35.4
 	k8s.io/apimachinery v0.35.4

@@ -39,4 +39,12 @@ var proxmoxConfigCmd = buildResourceCmd(resourceBinding[*vitiv1alpha1.ProxmoxCon
 	SearchLabel: func(az string, o *vitiv1alpha1.ProxmoxConfig) string {
 		return strings.Join([]string{az, o.Name, o.Spec.Name, o.Spec.Endpoint, o.Spec.Username}, " ")
 	},
+	SortKeys: map[string]func(a, b *vitiv1alpha1.ProxmoxConfig) int{
+		"spec-name": func(a, b *vitiv1alpha1.ProxmoxConfig) int { return strings.Compare(a.Spec.Name, b.Spec.Name) },
+		"endpoint":  func(a, b *vitiv1alpha1.ProxmoxConfig) int { return strings.Compare(a.Spec.Endpoint, b.Spec.Endpoint) },
+		"port":      func(a, b *vitiv1alpha1.ProxmoxConfig) int { return strings.Compare(a.Spec.Port, b.Spec.Port) },
+		"username":  func(a, b *vitiv1alpha1.ProxmoxConfig) int { return strings.Compare(a.Spec.Username, b.Spec.Username) },
+		"phase":     func(a, b *vitiv1alpha1.ProxmoxConfig) int { return strings.Compare(a.Status.Phase, b.Status.Phase) },
+		"status":    func(a, b *vitiv1alpha1.ProxmoxConfig) int { return strings.Compare(a.Status.Status, b.Status.Status) },
+	},
 })

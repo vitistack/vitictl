@@ -130,6 +130,7 @@ func init() {
 	rootCmd.AddCommand(etcdBackupCmd)
 	rootCmd.AddCommand(kubevirtConfigCmd)
 	rootCmd.AddCommand(proxmoxConfigCmd)
+	rootCmd.AddCommand(clusterStorageCmd)
 
 	cobra.AddTemplateFunc("cmdLabel", cmdLabel)
 	cobra.AddTemplateFunc("cmdLabelPadding", cmdLabelPadding)

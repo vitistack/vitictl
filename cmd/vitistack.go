@@ -22,7 +22,10 @@ var vitistackCmd = &cobra.Command{
 	Short:   "🌐 Inspect Vitistack resources",
 }
 
-var vitistackListOutput string
+var (
+	vitistackListOutput string
+	vitistackListSort   string
+)
 
 var vitistackListCmd = &cobra.Command{
 	Use:   "list",
@@ -54,12 +57,41 @@ var vitistackListCmd = &cobra.Command{
 			}
 		}
 
+		if err := sortByKeys(hits, vitistackListSort, vitistackComparators()); err != nil {
+			return err
+		}
 		if len(hits) == 0 && !format.IsStructured() {
 			fmt.Println("🤷 no vitistacks found")
 			return nil
 		}
 		return renderVitistacks(cmd, hits, format)
 	},
+}
+
+// vitistackComparators returns the sort comparators supported by Vitistack
+// list. Defaults: az, name, age. Plus the values shown in the table columns
+// (display-name, region, zone, infra, phase).
+func vitistackComparators() map[string]func(a, b vitistackHit) int {
+	return map[string]func(a, b vitistackHit) int{
+		"az":           func(a, b vitistackHit) int { return cmpStrings(a.azName, b.azName) },
+		"name":         func(a, b vitistackHit) int { return cmpStrings(a.vs.Name, b.vs.Name) },
+		"display-name": func(a, b vitistackHit) int { return cmpStrings(a.vs.Spec.DisplayName, b.vs.Spec.DisplayName) },
+		"region":       func(a, b vitistackHit) int { return cmpStrings(a.vs.Spec.Region, b.vs.Spec.Region) },
+		"zone":         func(a, b vitistackHit) int { return cmpStrings(a.vs.Spec.Zone, b.vs.Spec.Zone) },
+		"infra":        func(a, b vitistackHit) int { return cmpStrings(a.vs.Spec.Infrastructure, b.vs.Spec.Infrastructure) },
+		"phase":        func(a, b vitistackHit) int { return cmpStrings(a.vs.Status.Phase, b.vs.Status.Phase) },
+		"age": func(a, b vitistackHit) int {
+			ta := a.vs.CreationTimestamp.Time
+			tb := b.vs.CreationTimestamp.Time
+			if ta.Equal(tb) {
+				return 0
+			}
+			if ta.After(tb) {
+				return -1
+			}
+			return 1
+		},
+	}
 }
 
 var vitistackGetOutput string
@@ -231,6 +263,7 @@ func warn(err error) {
 func init() {
 	vitistackListCmd.Flags().StringVarP(&vitistackListOutput, "output", "o", "",
 		"output format: wide, json, yaml, name (default: table)")
+	vitistackListCmd.Flags().StringVarP(&vitistackListSort, "sort", "s", "", sortFlagHelpFor(vitistackComparators()))
 	vitistackGetCmd.Flags().StringVarP(&vitistackGetOutput, "output", "o", "",
 		"output format: wide, json, yaml, name (default: detailed view)")
 	vitistackCmd.AddCommand(vitistackListCmd, vitistackGetCmd)

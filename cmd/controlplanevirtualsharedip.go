@@ -46,4 +46,24 @@ var controlPlaneVirtualSharedIPCmd = buildResourceCmd(resourceBinding[*vitiv1alp
 			o.Spec.DatacenterIdentifier, strings.Join(o.Status.LoadBalancerIps, " "),
 		}, " ")
 	},
+	SortKeys: map[string]func(a, b *vitiv1alpha1.ControlPlaneVirtualSharedIP) int{
+		"provider": func(a, b *vitiv1alpha1.ControlPlaneVirtualSharedIP) int {
+			return strings.Compare(a.Spec.Provider, b.Spec.Provider)
+		},
+		"cluster": func(a, b *vitiv1alpha1.ControlPlaneVirtualSharedIP) int {
+			return strings.Compare(a.Spec.ClusterIdentifier, b.Spec.ClusterIdentifier)
+		},
+		"datacenter": func(a, b *vitiv1alpha1.ControlPlaneVirtualSharedIP) int {
+			return strings.Compare(a.Spec.DatacenterIdentifier, b.Spec.DatacenterIdentifier)
+		},
+		"method": func(a, b *vitiv1alpha1.ControlPlaneVirtualSharedIP) int {
+			return strings.Compare(a.Spec.Method, b.Spec.Method)
+		},
+		"phase": func(a, b *vitiv1alpha1.ControlPlaneVirtualSharedIP) int {
+			return strings.Compare(a.Status.Phase, b.Status.Phase)
+		},
+		"status": func(a, b *vitiv1alpha1.ControlPlaneVirtualSharedIP) int {
+			return strings.Compare(a.Status.Status, b.Status.Status)
+		},
+	},
 })

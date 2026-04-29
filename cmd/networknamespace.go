@@ -40,4 +40,31 @@ var networkNamespaceCmd = buildResourceCmd(resourceBinding[*vitiv1alpha1.Network
 	SearchLabel: func(az string, o *vitiv1alpha1.NetworkNamespace) string {
 		return strings.Join([]string{az, o.Namespace, o.Name, o.Spec.DatacenterIdentifier, o.Spec.SupervisorIdentifier, o.Status.NamespaceID}, " ")
 	},
+	SortKeys: map[string]func(a, b *vitiv1alpha1.NetworkNamespace) int{
+		"datacenter": func(a, b *vitiv1alpha1.NetworkNamespace) int {
+			return strings.Compare(a.Spec.DatacenterIdentifier, b.Spec.DatacenterIdentifier)
+		},
+		"supervisor": func(a, b *vitiv1alpha1.NetworkNamespace) int {
+			return strings.Compare(a.Spec.SupervisorIdentifier, b.Spec.SupervisorIdentifier)
+		},
+		"phase": func(a, b *vitiv1alpha1.NetworkNamespace) int { return strings.Compare(a.Status.Phase, b.Status.Phase) },
+		"vlan": func(a, b *vitiv1alpha1.NetworkNamespace) int {
+			switch {
+			case a.Status.VlanID < b.Status.VlanID:
+				return -1
+			case a.Status.VlanID > b.Status.VlanID:
+				return 1
+			}
+			return 0
+		},
+		"ipv4-prefix": func(a, b *vitiv1alpha1.NetworkNamespace) int {
+			return strings.Compare(a.Status.IPv4Prefix, b.Status.IPv4Prefix)
+		},
+		"ipv6-prefix": func(a, b *vitiv1alpha1.NetworkNamespace) int {
+			return strings.Compare(a.Status.IPv6Prefix, b.Status.IPv6Prefix)
+		},
+		"ns-id": func(a, b *vitiv1alpha1.NetworkNamespace) int {
+			return strings.Compare(a.Status.NamespaceID, b.Status.NamespaceID)
+		},
+	},
 })

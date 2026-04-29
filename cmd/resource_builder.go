@@ -29,6 +29,12 @@ type resourceBinding[T ctrlclient.Object, TList ctrlclient.ObjectList] struct {
 	Headers     func(wide bool) string                       // tab-separated header row
 	Row         func(azName string, obj T, wide bool) string // tab-separated row
 	SearchLabel func(azName string, obj T) string            // label to fuzzy-match against
+
+	// SortKeys are resource-specific sort comparators, keyed by lowercase
+	// column name (e.g. "phase", "provider"). The defaults — "name", "az",
+	// "age", and "namespace" (when Namespaced) — are added automatically;
+	// anything provided here augments or overrides them.
+	SortKeys map[string]func(a, b T) int
 }
 
 type azItem[T ctrlclient.Object] struct {
@@ -45,12 +51,14 @@ func buildResourceCmd[T ctrlclient.Object, TList ctrlclient.ObjectList](b resour
 		Short:   b.Short,
 	}
 
-	var listNS, listOut string
+	comparators := buildResourceComparators(b)
+
+	var listNS, listOut, listSort string
 	listCmd := &cobra.Command{
 		Use:   "list",
 		Short: "List " + b.Use + " across all configured availability zones",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCollect(cmd, listOut, listNS, b, func(hits []azItem[T], format printer.Format) error {
+			return runCollect(cmd, listOut, listNS, listSort, b, comparators, func(hits []azItem[T], format printer.Format) error {
 				if len(hits) == 0 && !format.IsStructured() {
 					fmt.Println("🤷 no " + b.Use + " found")
 					return nil
@@ -60,6 +68,7 @@ func buildResourceCmd[T ctrlclient.Object, TList ctrlclient.ObjectList](b resour
 		},
 	}
 	listCmd.Flags().StringVarP(&listOut, "output", "o", "", outputFlagHelp)
+	listCmd.Flags().StringVarP(&listSort, "sort", "s", "", sortFlagHelpFor(comparators))
 	if b.Namespaced {
 		listCmd.Flags().StringVarP(&listNS, "namespace", "n", "", "limit to this namespace")
 	}
@@ -70,7 +79,7 @@ func buildResourceCmd[T ctrlclient.Object, TList ctrlclient.ObjectList](b resour
 		Short: "Show a " + b.Use + " by name (searches all availability zones unless --az)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCollect(cmd, getOut, getNS, b, func(all []azItem[T], format printer.Format) error {
+			return runCollect(cmd, getOut, getNS, "", b, comparators, func(all []azItem[T], format printer.Format) error {
 				var hits []azItem[T]
 				for _, h := range all {
 					if h.obj.GetName() == args[0] {
@@ -89,13 +98,13 @@ func buildResourceCmd[T ctrlclient.Object, TList ctrlclient.ObjectList](b resour
 		getCmd.Flags().StringVarP(&getNS, "namespace", "n", "", "namespace of the resource")
 	}
 
-	var searchNS, searchOut string
+	var searchNS, searchOut, searchSort string
 	searchCmd := &cobra.Command{
 		Use:   "search [query]",
 		Short: "Fuzzy-search " + b.Use + " across all configured availability zones",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCollect(cmd, searchOut, searchNS, b, func(all []azItem[T], format printer.Format) error {
+			return runCollect(cmd, searchOut, searchNS, "", b, comparators, func(all []azItem[T], format printer.Format) error {
 				query := ""
 				if len(args) == 1 {
 					query = args[0]
@@ -112,6 +121,10 @@ func buildResourceCmd[T ctrlclient.Object, TList ctrlclient.ObjectList](b resour
 				for _, m := range matches {
 					hits = append(hits, m.Item)
 				}
+				// --sort overrides fuzzy ranking when explicitly given.
+				if err := sortByKeys(hits, searchSort, comparators); err != nil {
+					return err
+				}
 				if len(hits) == 0 && !format.IsStructured() {
 					fmt.Println("🤷 no " + b.Use + " matched")
 					return nil
@@ -121,6 +134,7 @@ func buildResourceCmd[T ctrlclient.Object, TList ctrlclient.ObjectList](b resour
 		},
 	}
 	searchCmd.Flags().StringVarP(&searchOut, "output", "o", "", outputFlagHelp)
+	searchCmd.Flags().StringVarP(&searchSort, "sort", "s", "", sortFlagHelpFor(comparators))
 	if b.Namespaced {
 		searchCmd.Flags().StringVarP(&searchNS, "namespace", "n", "", "limit search to this namespace")
 	}
@@ -131,12 +145,46 @@ func buildResourceCmd[T ctrlclient.Object, TList ctrlclient.ObjectList](b resour
 
 const outputFlagHelp = "output format: wide, json, yaml, name (default: table)"
 
+// buildResourceComparators assembles the comparator map a resource list/search
+// supports: the built-ins (name, az, age, and optionally namespace) plus any
+// resource-specific keys defined on the binding.
+func buildResourceComparators[T ctrlclient.Object, TList ctrlclient.ObjectList](
+	b resourceBinding[T, TList],
+) map[string]func(a, b azItem[T]) int {
+	out := map[string]func(a, b azItem[T]) int{
+		"name": func(a, b azItem[T]) int { return cmpStrings(a.obj.GetName(), b.obj.GetName()) },
+		"az":   func(a, b azItem[T]) int { return cmpStrings(a.azName, b.azName) },
+		"age": func(a, b azItem[T]) int {
+			// Smallest age first when ascending → newest creationTimestamp first.
+			ta := a.obj.GetCreationTimestamp().Time
+			tb := b.obj.GetCreationTimestamp().Time
+			if ta.Equal(tb) {
+				return 0
+			}
+			if ta.After(tb) {
+				return -1
+			}
+			return 1
+		},
+	}
+	if b.Namespaced {
+		out["namespace"] = func(a, b azItem[T]) int { return cmpStrings(a.obj.GetNamespace(), b.obj.GetNamespace()) }
+	}
+	for k, f := range b.SortKeys {
+		f := f
+		out[k] = func(a, b azItem[T]) int { return f(a.obj, b.obj) }
+	}
+	return out
+}
+
 // runCollect parses the format, connects to all resolved AZs, collects items
-// into a flat azItem slice, then hands the slice to `act` for filtering/rendering.
+// into a flat azItem slice, applies the optional sort, then hands the slice
+// to `act` for filtering/rendering.
 func runCollect[T ctrlclient.Object, TList ctrlclient.ObjectList](
 	_ *cobra.Command,
-	outFlag, nsFlag string,
+	outFlag, nsFlag, sortFlag string,
 	b resourceBinding[T, TList],
+	comparators map[string]func(a, b azItem[T]) int,
 	act func(hits []azItem[T], format printer.Format) error,
 ) error {
 	format, err := printer.Parse(outFlag)
@@ -153,6 +201,9 @@ func runCollect[T ctrlclient.Object, TList ctrlclient.ObjectList](
 		return err
 	}
 	hits := collectResource(ctx, clients, nsFlag, b)
+	if err := sortByKeys(hits, sortFlag, comparators); err != nil {
+		return err
+	}
 	return act(hits, format)
 }
 

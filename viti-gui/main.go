@@ -6,11 +6,20 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/vitistack/vitictl/internal/settings"
 )
 
 func main() {
+	// termbox puts the terminal in raw mode (ISIG cleared) so Ctrl+C is
+	// delivered as <C-c>, but ignoring SIGINT explicitly guards against
+	// edge cases where the terminal mode is restored mid-run and the
+	// default signal handler would otherwise tear down the TUI before
+	// the page binding (e.g. copy on the Secrets detail view) can fire.
+	signal.Ignore(syscall.SIGINT)
+
 	if err := settings.Init(); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to initialize settings: %v\n", err)
 		os.Exit(1)

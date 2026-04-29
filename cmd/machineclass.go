@@ -39,4 +39,32 @@ var machineClassCmd = buildResourceCmd(resourceBinding[*vitiv1alpha1.MachineClas
 	SearchLabel: func(az string, o *vitiv1alpha1.MachineClass) string {
 		return strings.Join([]string{az, o.Name, o.Spec.DisplayName, o.Spec.Category}, " ")
 	},
+	SortKeys: map[string]func(a, b *vitiv1alpha1.MachineClass) int{
+		"display-name": func(a, b *vitiv1alpha1.MachineClass) int {
+			return strings.Compare(a.Spec.DisplayName, b.Spec.DisplayName)
+		},
+		"category": func(a, b *vitiv1alpha1.MachineClass) int { return strings.Compare(a.Spec.Category, b.Spec.Category) },
+		"phase":    func(a, b *vitiv1alpha1.MachineClass) int { return strings.Compare(a.Status.Phase, b.Status.Phase) },
+		"cpu": func(a, b *vitiv1alpha1.MachineClass) int {
+			switch {
+			case a.Spec.CPU.Cores < b.Spec.CPU.Cores:
+				return -1
+			case a.Spec.CPU.Cores > b.Spec.CPU.Cores:
+				return 1
+			}
+			return 0
+		},
+		"memory": func(a, b *vitiv1alpha1.MachineClass) int { return a.Spec.Memory.Quantity.Cmp(b.Spec.Memory.Quantity) },
+		"gpu": func(a, b *vitiv1alpha1.MachineClass) int {
+			switch {
+			case a.Spec.GPU.Cores < b.Spec.GPU.Cores:
+				return -1
+			case a.Spec.GPU.Cores > b.Spec.GPU.Cores:
+				return 1
+			}
+			return 0
+		},
+		"enabled": func(a, b *vitiv1alpha1.MachineClass) int { return cmpBool(a.Spec.Enabled, b.Spec.Enabled) },
+		"default": func(a, b *vitiv1alpha1.MachineClass) int { return cmpBool(a.Spec.Default, b.Spec.Default) },
+	},
 })

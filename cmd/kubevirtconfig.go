@@ -38,4 +38,15 @@ var kubevirtConfigCmd = buildResourceCmd(resourceBinding[*vitiv1alpha1.KubevirtC
 	SearchLabel: func(az string, o *vitiv1alpha1.KubevirtConfig) string {
 		return strings.Join([]string{az, o.Name, o.Spec.Name, o.Spec.SecretNamespace, o.Spec.KubeconfigSecretRef}, " ")
 	},
+	SortKeys: map[string]func(a, b *vitiv1alpha1.KubevirtConfig) int{
+		"spec-name": func(a, b *vitiv1alpha1.KubevirtConfig) int { return strings.Compare(a.Spec.Name, b.Spec.Name) },
+		"secret-ns": func(a, b *vitiv1alpha1.KubevirtConfig) int {
+			return strings.Compare(a.Spec.SecretNamespace, b.Spec.SecretNamespace)
+		},
+		"secret-ref": func(a, b *vitiv1alpha1.KubevirtConfig) int {
+			return strings.Compare(a.Spec.KubeconfigSecretRef, b.Spec.KubeconfigSecretRef)
+		},
+		"phase":  func(a, b *vitiv1alpha1.KubevirtConfig) int { return strings.Compare(a.Status.Phase, b.Status.Phase) },
+		"status": func(a, b *vitiv1alpha1.KubevirtConfig) int { return strings.Compare(a.Status.Status, b.Status.Status) },
+	},
 })

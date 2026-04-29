@@ -98,7 +98,15 @@ func newApp() *app {
 
 	status := widgets.NewParagraph()
 	status.Border = false
-	status.TextStyle = ui.NewStyle(ui.ColorClear, ui.ColorClear, ui.ModifierClear)
+	status.TextStyle = ui.NewStyle(ui.ColorWhite)
+	// termui's Block.SetRect unconditionally shrinks Inner by one cell on
+	// every side, even when Border is false — a 2-row outer rect ends up
+	// with a 0-row inner rect and the help text never gets drawn. Negative
+	// padding cancels that out so Inner covers the full status area.
+	status.PaddingTop = -1
+	status.PaddingBottom = -1
+	status.PaddingLeft = -1
+	status.PaddingRight = -1
 	a.status = status
 
 	a.setStatus()
@@ -108,9 +116,12 @@ func newApp() *app {
 func (a *app) setStatus() {
 	var help string
 	if a.page == nil {
-		help = " [↑/↓] select menu   [enter] open   [q] quit"
+		help = "[↑/↓] select menu  [Enter] open  [Ctrl-Q / q] quit"
 	} else {
-		help = " " + a.page.help() + "    [esc] back    [q] quit"
+		// Page help may already be multi-line; put the global suffix on
+		// its own line so it never gets pushed off-screen by a long
+		// page-specific binding row.
+		help = a.page.help() + "\n[Esc] back  [Ctrl-Q / q] quit"
 	}
 	a.status.Text = help
 }
@@ -121,7 +132,10 @@ func (a *app) layout() {
 	if a.width < 60 {
 		menuWidth = a.width / 3
 	}
-	statusHeight := 1
+	// Three rows so the secrets detail view's two help lines plus the
+	// global "[Esc] back / [Ctrl-Q] quit" suffix line are all visible
+	// even on narrow terminals where each line would otherwise wrap.
+	statusHeight := 3
 
 	a.menu.SetRect(0, 0, menuWidth, a.height-statusHeight)
 	if a.page != nil {
@@ -152,7 +166,7 @@ func (a *app) render() {
 
 func (a *app) handleGlobalKey(e ui.Event) bool {
 	switch e.ID {
-	case "q", "<C-c>":
+	case "q", "<C-q>":
 		a.shouldQuit = true
 		return true
 	case "<Tab>":
