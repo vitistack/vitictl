@@ -17,11 +17,18 @@ import (
 // ClusterRequest is what `viti kc console` hands to a provider handler
 // after it has resolved the cluster, fetched the credentials secret, and
 // (optionally) resolved control-plane endpoints.
+//
+// Endpoints and Nodes are kept separate, mirroring talosctl semantics: for
+// Talos, --endpoints lists the API addresses the client connects to (control
+// planes only — that's where the API runs) while --nodes targets the hosts
+// the dashboard should display data for (control planes AND workers, so the
+// whole cluster is visible).
 type ClusterRequest struct {
 	Cluster   *vitiv1alpha1.KubernetesCluster
 	Secret    *corev1.Secret
 	Client    *kube.Client
-	Endpoints []string // resolved control-plane addresses
+	Endpoints []string // API addresses (control planes)
+	Nodes     []string // dashboard target nodes (all machines)
 }
 
 // MachineRequest is what `viti machine console` hands to a handler. The

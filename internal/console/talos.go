@@ -26,7 +26,15 @@ func (t *talosHandler) ClusterConsole(_ context.Context, req ClusterRequest) err
 	if len(req.Endpoints) == 0 {
 		return fmt.Errorf("no control-plane endpoints available for cluster %s — cannot start dashboard", clusterID)
 	}
-	return openTalosDashboard(req.Secret, clusterID, req.Endpoints, req.Endpoints)
+	// Default --nodes to every Machine in the cluster so the dashboard shows
+	// workers too. Fall back to the API endpoints when the caller didn't
+	// supply a node set (older callers, or clusters where the Machine list
+	// was unreachable).
+	nodes := req.Nodes
+	if len(nodes) == 0 {
+		nodes = req.Endpoints
+	}
+	return openTalosDashboard(req.Secret, clusterID, req.Endpoints, nodes)
 }
 
 func (t *talosHandler) MachineConsole(_ context.Context, req MachineRequest) error {

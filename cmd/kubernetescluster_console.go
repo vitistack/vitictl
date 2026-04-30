@@ -72,11 +72,29 @@ overridable with --endpoint (repeatable).`,
 			endpoints = resolved
 		}
 
+		// Dashboard --nodes set: every Machine in the cluster (CPs + workers)
+		// so the dashboard shows the whole cluster, not just control planes.
+		// Soft-fail: a missing Machine list shouldn't block the dashboard
+		// from coming up against the resolved endpoints.
+		nodes, nodesWarn, nerr := login.ResolveClusterMachineNodes(
+			ctx, hit.client.Ctrl, hit.cluster.Namespace, hit.cluster.Spec.Cluster.ClusterId,
+		)
+		if nerr != nil {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "⚠️  %s\n", nerr)
+		}
+		if nodesWarn != "" {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "⚠️  %s\n", nodesWarn)
+		}
+		if len(nodes) > 0 {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "ℹ️  dashboard will show %d node(s) from cluster Machines\n", len(nodes))
+		}
+
 		return handler.ClusterConsole(ctx, console.ClusterRequest{
 			Cluster:   hit.cluster,
 			Secret:    secret,
 			Client:    hit.client,
 			Endpoints: endpoints,
+			Nodes:     nodes,
 		})
 	},
 }

@@ -155,3 +155,48 @@ func controlPlaneMachineEndpoints(ctx context.Context, c ctrlclient.Client, name
 	}
 	return addrs, "", nil
 }
+
+// ResolveClusterMachineNodes returns the IP addresses of every Machine that
+// belongs to the cluster (control planes AND workers). It is the right input
+// for `talosctl dashboard --nodes` when the operator wants visibility into
+// the whole cluster — the API endpoint set (control-plane only) is resolved
+// separately by ResolveControlPlaneEndpoints.
+//
+// Filter is by name prefix "<clusterId>-", matching the vitistack naming
+// scheme used by the talos-operator (<clusterId>-ctpN, <clusterId>-wrkN…).
+// Returns the addresses, a warning suitable for surfacing to the user when
+// non-fatal, and an error for hard failures (e.g. List failed).
+func ResolveClusterMachineNodes(ctx context.Context, c ctrlclient.Client, namespace, clusterID string) ([]string, string, error) {
+	if clusterID == "" {
+		return nil, "", fmt.Errorf("clusterId is empty")
+	}
+	var list vitiv1alpha1.MachineList
+	if err := c.List(ctx, &list, ctrlclient.InNamespace(namespace)); err != nil {
+		return nil, "", fmt.Errorf("listing Machines: %w", err)
+	}
+	prefix := clusterID + "-"
+	var addrs []string
+	var seen int
+	for i := range list.Items {
+		m := &list.Items[i]
+		if !strings.HasPrefix(m.Name, prefix) {
+			continue
+		}
+		seen++
+		switch {
+		case len(m.Status.IPAddresses) > 0:
+			addrs = append(addrs, m.Status.IPAddresses...)
+		case len(m.Status.PrivateIPAddresses) > 0:
+			addrs = append(addrs, m.Status.PrivateIPAddresses...)
+		case len(m.Status.PublicIPAddresses) > 0:
+			addrs = append(addrs, m.Status.PublicIPAddresses...)
+		}
+	}
+	if seen == 0 {
+		return nil, fmt.Sprintf("no Machines matched %s* in namespace %s", prefix, namespace), nil
+	}
+	if len(addrs) == 0 {
+		return nil, fmt.Sprintf("found %d machine(s) matching %s* but none have status.ipAddresses populated", seen, prefix), nil
+	}
+	return dedupeKeepOrder(addrs), "", nil
+}
