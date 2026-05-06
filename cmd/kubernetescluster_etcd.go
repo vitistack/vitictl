@@ -25,6 +25,7 @@ var (
 	kcEtcdBackupEndpoints []string
 	kcEtcdBackupCopyRaw   bool
 	kcEtcdBackupUseVIP    bool
+	kcEtcdBackupIPv6      bool
 
 	kcEtcdRestoreNamespace     string
 	kcEtcdRestoreFrom          string
@@ -33,6 +34,7 @@ var (
 	kcEtcdRestoreYes           bool
 	kcEtcdRestoreSkipHashCheck bool
 	kcEtcdRestoreUseVIP        bool
+	kcEtcdRestoreIPv6          bool
 )
 
 var kcEtcdBackupCmd = &cobra.Command{
@@ -69,7 +71,7 @@ hash and must be restored with --skip-hash-check.`,
 		if err != nil {
 			return err
 		}
-		endpoints, err := resolveEtcdEndpoints(ctx, cmd, hit, kcEtcdBackupEndpoints, kcEtcdBackupUseVIP)
+		endpoints, err := resolveEtcdEndpoints(ctx, cmd, hit, kcEtcdBackupEndpoints, kcEtcdBackupUseVIP, kcEtcdBackupIPv6)
 		if err != nil {
 			return err
 		}
@@ -129,7 +131,7 @@ file copy, no integrity hash).`,
 		if err != nil {
 			return err
 		}
-		endpoints, err := resolveEtcdEndpoints(ctx, cmd, hit, kcEtcdRestoreEndpoints, kcEtcdRestoreUseVIP)
+		endpoints, err := resolveEtcdEndpoints(ctx, cmd, hit, kcEtcdRestoreEndpoints, kcEtcdRestoreUseVIP, kcEtcdRestoreIPv6)
 		if err != nil {
 			return err
 		}
@@ -186,7 +188,7 @@ func resolveClusterAndSecret(ctx context.Context, name, namespace string) (*kcHi
 // from this machine, surfacing unreachable addresses as warnings and
 // erroring if none respond. This avoids the "i/o timeout deep inside
 // talosctl" failure mode when CPs are on a split-horizon network.
-func resolveEtcdEndpoints(ctx context.Context, cmd *cobra.Command, hit *kcHit, override []string, useVIP bool) ([]string, error) {
+func resolveEtcdEndpoints(ctx context.Context, cmd *cobra.Command, hit *kcHit, override []string, useVIP, includeIPv6 bool) ([]string, error) {
 	var candidates []string
 	var source string
 	if len(override) > 0 {
@@ -194,7 +196,7 @@ func resolveEtcdEndpoints(ctx context.Context, cmd *cobra.Command, hit *kcHit, o
 		source = "--endpoint"
 	} else {
 		resolved, src, warnings, err := login.ResolveControlPlaneEndpoints(
-			ctx, hit.client.Ctrl, hit.cluster.Namespace, hit.cluster.Spec.Cluster.ClusterId, useVIP,
+			ctx, hit.client.Ctrl, hit.cluster.Namespace, hit.cluster.Spec.Cluster.ClusterId, useVIP, includeIPv6,
 		)
 		if err != nil {
 			return nil, err
@@ -285,6 +287,8 @@ func init() {
 		"unhealthy-cluster fallback: cp /var/lib/etcd/member/snap/db (no integrity hash)")
 	kcEtcdBackupCmd.Flags().BoolVar(&kcEtcdBackupUseVIP, "use-vip", false,
 		"include the CPVIP load-balancer address(es) in the endpoint list (default: control-plane node IPs only)")
+	kcEtcdBackupCmd.Flags().BoolVar(&kcEtcdBackupIPv6, "ipv6", false,
+		"include IPv6 endpoints (default: IPv4 only)")
 
 	kcEtcdRestoreCmd.Flags().StringVarP(&kcEtcdRestoreNamespace, "namespace", "n", "", "namespace of the KubernetesCluster")
 	kcEtcdRestoreCmd.Flags().StringVar(&kcEtcdRestoreFrom, "from", "", "snapshot file to restore from (required)")
@@ -296,6 +300,8 @@ func init() {
 		"pass --recover-skip-hash-check to talosctl (required for snapshots taken with --copy-raw)")
 	kcEtcdRestoreCmd.Flags().BoolVar(&kcEtcdRestoreUseVIP, "use-vip", false,
 		"include the CPVIP load-balancer address(es) in the endpoint list (default: control-plane node IPs only)")
+	kcEtcdRestoreCmd.Flags().BoolVar(&kcEtcdRestoreIPv6, "ipv6", false,
+		"include IPv6 endpoints (default: IPv4 only)")
 
 	kubernetesClusterCmd.AddCommand(kcEtcdBackupCmd, kcEtcdRestoreCmd)
 }

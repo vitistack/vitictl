@@ -16,6 +16,7 @@ var (
 	kcConsoleNamespace string
 	kcConsoleEndpoints []string
 	kcConsoleUseVIP    bool
+	kcConsoleIPv6      bool
 )
 
 var kcConsoleCmd = &cobra.Command{
@@ -58,7 +59,7 @@ overridable with --endpoint (repeatable).`,
 		endpoints := kcConsoleEndpoints
 		if len(endpoints) == 0 {
 			resolved, src, warnings, rerr := login.ResolveControlPlaneEndpoints(
-				ctx, hit.client.Ctrl, hit.cluster.Namespace, hit.cluster.Spec.Cluster.ClusterId, kcConsoleUseVIP,
+				ctx, hit.client.Ctrl, hit.cluster.Namespace, hit.cluster.Spec.Cluster.ClusterId, kcConsoleUseVIP, kcConsoleIPv6,
 			)
 			if rerr != nil {
 				return rerr
@@ -77,7 +78,7 @@ overridable with --endpoint (repeatable).`,
 		// Soft-fail: a missing Machine list shouldn't block the dashboard
 		// from coming up against the resolved endpoints.
 		nodes, nodesWarn, nerr := login.ResolveClusterMachineNodes(
-			ctx, hit.client.Ctrl, hit.cluster.Namespace, hit.cluster.Spec.Cluster.ClusterId,
+			ctx, hit.client.Ctrl, hit.cluster.Namespace, hit.cluster.Spec.Cluster.ClusterId, kcConsoleIPv6,
 		)
 		if nerr != nil {
 			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "⚠️  %s\n", nerr)
@@ -105,6 +106,8 @@ func init() {
 		"explicit control-plane endpoint (repeatable); overrides auto-resolution")
 	kcConsoleCmd.Flags().BoolVar(&kcConsoleUseVIP, "use-vip", false,
 		"include the CPVIP load-balancer address(es) in the endpoint list (default: control-plane node IPs only)")
+	kcConsoleCmd.Flags().BoolVar(&kcConsoleIPv6, "ipv6", false,
+		"include IPv6 endpoint and node addresses (default: IPv4 only — many workstations can't reach v6 nodes and talosctl will hang on the dial timeout)")
 
 	kubernetesClusterCmd.AddCommand(kcConsoleCmd)
 }

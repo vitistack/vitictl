@@ -13,6 +13,7 @@ import (
 	vitiv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	"github.com/vitistack/vitictl/internal/fuzzy"
 	"github.com/vitistack/vitictl/internal/kube"
+	"github.com/vitistack/vitictl/internal/login"
 	"github.com/vitistack/vitictl/internal/printer"
 )
 
@@ -343,10 +344,21 @@ func printMachine(cmd *cobra.Command, azName string, m *vitiv1alpha1.Machine) {
 }
 
 func allIPs(m *vitiv1alpha1.Machine) []string {
-	out := make([]string, 0, len(m.Status.IPAddresses)+len(m.Status.PublicIPAddresses))
-	out = append(out, m.Status.IPAddresses...)
+	// Node-level IPs only (drops pod CNI / kube-proxy / vethXXX entries the
+	// provider leaks into Status.IPAddresses), then append public IPs and
+	// dedupe to match the previous "everything visible" surface area.
+	out := login.MachineNodeIPs(m)
 	out = append(out, m.Status.PublicIPAddresses...)
-	return out
+	seen := make(map[string]struct{}, len(out))
+	deduped := out[:0]
+	for _, ip := range out {
+		if _, ok := seen[ip]; ok {
+			continue
+		}
+		seen[ip] = struct{}{}
+		deduped = append(deduped, ip)
+	}
+	return deduped
 }
 
 func truncate(s string, n int) string {

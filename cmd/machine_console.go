@@ -20,6 +20,7 @@ var (
 	machineConsoleEndpoints []string
 	machineConsoleNodes     []string
 	machineConsoleUseVIP    bool
+	machineConsoleIPv6      bool
 )
 
 // Machines are named <clusterId>-ctp<N> for control planes and
@@ -82,7 +83,7 @@ Override either side with --endpoint (repeatable) or --node (repeatable).`,
 		endpoints := machineConsoleEndpoints
 		if len(endpoints) == 0 {
 			resolved, src, warnings, rerr := login.ResolveControlPlaneEndpoints(
-				ctx, hit.client.Ctrl, owning.Namespace, clusterID, machineConsoleUseVIP,
+				ctx, hit.client.Ctrl, owning.Namespace, clusterID, machineConsoleUseVIP, machineConsoleIPv6,
 			)
 			if rerr != nil {
 				return rerr
@@ -212,27 +213,25 @@ func findClusterByID(ctx context.Context, c *kube.Client, clusterID, preferredNs
 // causes "x509: certificate is valid for X, not Y".
 //
 // Strategy, in order:
-//  1. Any machine IP that also appears in `endpoints` (typically the
-//     CPVIP pool) — for control-plane machines this is the cert-valid IP.
-//  2. status.privateIPAddresses if populated — the cluster-internal
-//     addresses are typically in the cert.
-//  3. status.ipAddresses as a last resort (may trigger TLS errors; user
-//     can pass --node explicitly if so).
+//  1. The machine's filtered node IPs that also appear in `endpoints`
+//     (typically the CPVIP pool) — for control-plane machines this is
+//     the cert-valid IP.
+//  2. The filtered node IPs themselves — for workers, this is the real
+//     NIC address(es). Filtering (login.MachineNodeIPs) drops CNI/pod-
+//     CIDR/internal entries that the kubevirt VMI's qemu-guest-agent
+//     leaks into status.ipAddresses (cilium_host /32, link-local v6, …)
+//     and that the cert never covers.
+//  3. status.publicIPAddresses as a last resort.
 func pickMachineNodes(m *vitiv1alpha1.Machine, endpoints []string) []string {
 	if m == nil {
 		return nil
 	}
-	if inter := intersect(m.Status.IPAddresses, endpoints); len(inter) > 0 {
+	nodeIPs := login.MachineNodeIPs(m)
+	if inter := intersect(nodeIPs, endpoints); len(inter) > 0 {
 		return inter
 	}
-	if inter := intersect(m.Status.PrivateIPAddresses, endpoints); len(inter) > 0 {
-		return inter
-	}
-	if len(m.Status.PrivateIPAddresses) > 0 {
-		return m.Status.PrivateIPAddresses
-	}
-	if len(m.Status.IPAddresses) > 0 {
-		return m.Status.IPAddresses
+	if len(nodeIPs) > 0 {
+		return nodeIPs
 	}
 	if len(m.Status.PublicIPAddresses) > 0 {
 		return m.Status.PublicIPAddresses
@@ -273,6 +272,8 @@ func init() {
 		"explicit target node address (repeatable); default: the machine's IP that intersects the endpoints")
 	machineConsoleCmd.Flags().BoolVar(&machineConsoleUseVIP, "use-vip", false,
 		"include the CPVIP load-balancer address(es) in the endpoint list (default: control-plane node IPs only)")
+	machineConsoleCmd.Flags().BoolVar(&machineConsoleIPv6, "ipv6", false,
+		"include IPv6 endpoints (default: IPv4 only)")
 
 	machineCmd.AddCommand(machineConsoleCmd)
 }
