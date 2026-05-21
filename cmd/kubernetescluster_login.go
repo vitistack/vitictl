@@ -3,8 +3,11 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
@@ -50,7 +53,7 @@ default kubectl/talosctl config files.
 
 Requires kubectl and/or talosctl to be installed; missing tools cause the
 matching merge step to be skipped with a warning.`,
-	Args: cobra.ExactArgs(1),
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := context.Background()
 		zones, err := kube.ResolveAvailabilityZones(AvailabilityZone())
@@ -61,9 +64,19 @@ matching merge step to be skipped with a warning.`,
 		if err != nil {
 			return err
 		}
-		hit, err := findClusterAcrossAZs(ctx, clients, args[0], kcLoginNamespace)
-		if err != nil {
-			return err
+
+		var hit *kcHit
+		if len(args) == 1 {
+			hit, err = findClusterAcrossAZs(ctx, clients, args[0], kcLoginNamespace)
+			if err != nil {
+				return err
+			}
+		} else {
+			all := collectClusters(ctx, clients, kcLoginNamespace)
+			hit, err = fzfSelectCluster(all)
+			if err != nil {
+				return err
+			}
 		}
 		secret, err := extract.FindClusterSecret(ctx, hit.client.Ctrl, hit.cluster)
 		if err != nil {
@@ -101,6 +114,55 @@ matching merge step to be skipped with a warning.`,
 		}
 		return nil
 	},
+}
+
+// fzfSelectCluster launches an interactive fzf picker over the provided hits
+// and returns the one the user selects. Errors if fzf is not on PATH or the
+// user cancels.
+func fzfSelectCluster(hits []kcHit) (*kcHit, error) {
+	if len(hits) == 0 {
+		return nil, fmt.Errorf("no kubernetesclusters found")
+	}
+	if _, err := exec.LookPath("fzf"); err != nil {
+		return nil, fmt.Errorf("no cluster name given and fzf is not on PATH — pass a cluster name or install fzf")
+	}
+
+	var sb strings.Builder
+	for i, h := range hits {
+		fmt.Fprintf(&sb, "%d\t%s\n", i, h.cluster.Name)
+	}
+
+	fzfCmd := exec.Command("fzf",
+		"--with-nth=2",
+		"--delimiter=\t",
+		"--height=50%",
+		"--layout=reverse",
+		"--border",
+		"--prompt=cluster> ",
+		"--no-sort",
+	)
+	fzfCmd.Stdin = strings.NewReader(sb.String())
+	fzfCmd.Stderr = os.Stderr
+
+	out, err := fzfCmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && (exitErr.ExitCode() == 130 || exitErr.ExitCode() == 1) {
+			return nil, fmt.Errorf("no cluster selected")
+		}
+		return nil, fmt.Errorf("fzf: %w", err)
+	}
+
+	selected := strings.TrimSpace(string(out))
+	if selected == "" {
+		return nil, fmt.Errorf("no cluster selected")
+	}
+
+	parts := strings.SplitN(selected, "\t", 2)
+	idx, err := strconv.Atoi(parts[0])
+	if err != nil || idx < 0 || idx >= len(hits) {
+		return nil, fmt.Errorf("unexpected fzf output: %q", selected)
+	}
+	return &hits[idx], nil
 }
 
 // checkLoginCLIs reports which of kubectl / talosctl are available.
