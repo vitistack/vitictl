@@ -24,7 +24,6 @@ var (
 	kcLoginEndpoints    []string
 	kcLoginEndpointFrom string // "auto" (default) | "secret"
 	kcLoginContextName  string
-	kcLoginForce        bool
 	kcLoginNoActivate   bool
 	kcLoginUseVIP       bool
 	kcLoginIPv6         bool
@@ -37,7 +36,7 @@ var kcLoginCmd = &cobra.Command{
 kubeconfig + talosconfig as a new context on this machine.
 
 By default the context name is the cluster's clusterId. Existing contexts
-with the same name are refused — pass --force to overwrite.
+with the same name are overwritten automatically.
 
 For Talos clusters the talosconfig's endpoints are rewritten to the
 cluster's control-plane addresses, discovered in this order:
@@ -197,7 +196,7 @@ func doKubeconfig(cmd *cobra.Command, secret *corev1.Secret, contextName string)
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "📄 wrote %s (context %q)\n", path, contextName)
 		return nil
 	}
-	out, err := login.MergeKubeconfig(kc, contextName, "", !kcLoginNoActivate, kcLoginForce)
+	out, err := login.MergeKubeconfig(kc, contextName, "", !kcLoginNoActivate, true)
 	if err != nil {
 		return fmt.Errorf("merging kubeconfig: %w", err)
 	}
@@ -261,7 +260,7 @@ func doTalosconfig(cmd *cobra.Command, ctx context.Context, hit *kcHit, secret *
 		return nil
 	}
 
-	out, err := login.MergeTalosconfig(tc, contextName, endpoints, "", !kcLoginNoActivate, kcLoginForce)
+	out, err := login.MergeTalosconfig(tc, contextName, endpoints, "", !kcLoginNoActivate, true)
 	if err != nil {
 		return fmt.Errorf("merging talosconfig: %w", err)
 	}
@@ -288,7 +287,6 @@ func init() {
 	kcLoginCmd.Flags().StringVar(&kcLoginEndpointFrom, "endpoint-from", "",
 		"set to \"secret\" to keep the talosconfig's original endpoints (default: auto-resolve from CPVIP / Machines)")
 	kcLoginCmd.Flags().StringVar(&kcLoginContextName, "context-name", "", "override the context name (default: clusterId)")
-	kcLoginCmd.Flags().BoolVar(&kcLoginForce, "force", false, "overwrite an existing context with the same name")
 	kcLoginCmd.Flags().BoolVar(&kcLoginNoActivate, "no-activate", false, "merge but do not change current-context")
 	kcLoginCmd.Flags().BoolVar(&kcLoginUseVIP, "use-vip", false,
 		"include the CPVIP load-balancer address(es) in the resolved talos endpoints (default: control-plane node IPs only)")
