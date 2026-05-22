@@ -126,6 +126,10 @@ func fzfSelectCluster(hits []kcHit) (*kcHit, error) {
 		return nil, fmt.Errorf("no cluster name given and fzf is not on PATH — pass a cluster name or install fzf")
 	}
 
+	if err := sortByKeys(hits, "name", kcComparators()); err != nil {
+		return nil, err
+	}
+
 	var sb strings.Builder
 	for i, h := range hits {
 		fmt.Fprintf(&sb, "%d\t%s\n", i, h.cluster.Name)
