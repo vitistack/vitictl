@@ -3,8 +3,11 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
@@ -21,7 +24,6 @@ var (
 	kcLoginEndpoints    []string
 	kcLoginEndpointFrom string // "auto" (default) | "secret"
 	kcLoginContextName  string
-	kcLoginForce        bool
 	kcLoginNoActivate   bool
 	kcLoginUseVIP       bool
 	kcLoginIPv6         bool
@@ -34,7 +36,7 @@ var kcLoginCmd = &cobra.Command{
 kubeconfig + talosconfig as a new context on this machine.
 
 By default the context name is the cluster's clusterId. Existing contexts
-with the same name are refused — pass --force to overwrite.
+with the same name are overwritten automatically.
 
 For Talos clusters the talosconfig's endpoints are rewritten to the
 cluster's control-plane addresses, discovered in this order:
@@ -50,7 +52,7 @@ default kubectl/talosctl config files.
 
 Requires kubectl and/or talosctl to be installed; missing tools cause the
 matching merge step to be skipped with a warning.`,
-	Args: cobra.ExactArgs(1),
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := context.Background()
 		zones, err := kube.ResolveAvailabilityZones(AvailabilityZone())
@@ -61,9 +63,19 @@ matching merge step to be skipped with a warning.`,
 		if err != nil {
 			return err
 		}
-		hit, err := findClusterAcrossAZs(ctx, clients, args[0], kcLoginNamespace)
-		if err != nil {
-			return err
+
+		var hit *kcHit
+		if len(args) == 1 {
+			hit, err = findClusterAcrossAZs(ctx, clients, args[0], kcLoginNamespace)
+			if err != nil {
+				return err
+			}
+		} else {
+			all := collectClusters(ctx, clients, kcLoginNamespace)
+			hit, err = fzfSelectCluster(all)
+			if err != nil {
+				return err
+			}
 		}
 		secret, err := extract.FindClusterSecret(ctx, hit.client.Ctrl, hit.cluster)
 		if err != nil {
@@ -103,6 +115,55 @@ matching merge step to be skipped with a warning.`,
 	},
 }
 
+// fzfSelectCluster launches an interactive fzf picker over the provided hits
+// and returns the one the user selects. Errors if fzf is not on PATH or the
+// user cancels.
+func fzfSelectCluster(hits []kcHit) (*kcHit, error) {
+	if len(hits) == 0 {
+		return nil, fmt.Errorf("no kubernetesclusters found")
+	}
+	if _, err := exec.LookPath("fzf"); err != nil {
+		return nil, fmt.Errorf("no cluster name given and fzf is not on PATH — pass a cluster name or install fzf")
+	}
+
+	var sb strings.Builder
+	for i, h := range hits {
+		fmt.Fprintf(&sb, "%d\t%s\n", i, h.cluster.Name)
+	}
+
+	fzfCmd := exec.Command("fzf",
+		"--with-nth=2",
+		"--delimiter=\t",
+		"--height=50%",
+		"--layout=reverse",
+		"--border",
+		"--prompt=cluster> ",
+		"--no-sort",
+	)
+	fzfCmd.Stdin = strings.NewReader(sb.String())
+	fzfCmd.Stderr = os.Stderr
+
+	out, err := fzfCmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && (exitErr.ExitCode() == 130 || exitErr.ExitCode() == 1) {
+			return nil, fmt.Errorf("no cluster selected")
+		}
+		return nil, fmt.Errorf("fzf: %w", err)
+	}
+
+	selected := strings.TrimSpace(string(out))
+	if selected == "" {
+		return nil, fmt.Errorf("no cluster selected")
+	}
+
+	parts := strings.SplitN(selected, "\t", 2)
+	idx, err := strconv.Atoi(parts[0])
+	if err != nil || idx < 0 || idx >= len(hits) {
+		return nil, fmt.Errorf("unexpected fzf output: %q", selected)
+	}
+	return &hits[idx], nil
+}
+
 // checkLoginCLIs reports which of kubectl / talosctl are available.
 // Missing tools are warned about — but only for the cases that matter for
 // the current cluster type (non-Talos clusters don't need talosctl).
@@ -135,7 +196,7 @@ func doKubeconfig(cmd *cobra.Command, secret *corev1.Secret, contextName string)
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "📄 wrote %s (context %q)\n", path, contextName)
 		return nil
 	}
-	out, err := login.MergeKubeconfig(kc, contextName, "", !kcLoginNoActivate, kcLoginForce)
+	out, err := login.MergeKubeconfig(kc, contextName, "", !kcLoginNoActivate, true)
 	if err != nil {
 		return fmt.Errorf("merging kubeconfig: %w", err)
 	}
@@ -199,7 +260,7 @@ func doTalosconfig(cmd *cobra.Command, ctx context.Context, hit *kcHit, secret *
 		return nil
 	}
 
-	out, err := login.MergeTalosconfig(tc, contextName, endpoints, "", !kcLoginNoActivate, kcLoginForce)
+	out, err := login.MergeTalosconfig(tc, contextName, endpoints, "", !kcLoginNoActivate, true)
 	if err != nil {
 		return fmt.Errorf("merging talosconfig: %w", err)
 	}
@@ -226,7 +287,6 @@ func init() {
 	kcLoginCmd.Flags().StringVar(&kcLoginEndpointFrom, "endpoint-from", "",
 		"set to \"secret\" to keep the talosconfig's original endpoints (default: auto-resolve from CPVIP / Machines)")
 	kcLoginCmd.Flags().StringVar(&kcLoginContextName, "context-name", "", "override the context name (default: clusterId)")
-	kcLoginCmd.Flags().BoolVar(&kcLoginForce, "force", false, "overwrite an existing context with the same name")
 	kcLoginCmd.Flags().BoolVar(&kcLoginNoActivate, "no-activate", false, "merge but do not change current-context")
 	kcLoginCmd.Flags().BoolVar(&kcLoginUseVIP, "use-vip", false,
 		"include the CPVIP load-balancer address(es) in the resolved talos endpoints (default: control-plane node IPs only)")
