@@ -77,42 +77,94 @@ matching merge step to be skipped with a warning.`,
 				return err
 			}
 		}
-		secret, err := extract.FindClusterSecret(ctx, hit.client.Ctrl, hit.cluster)
+		return loginCluster(cmd, ctx, hit, false)
+	},
+}
+
+var kcLoginAllCmd = &cobra.Command{
+	Use:   "login-all",
+	Short: "Merge kubeconfig (and talosconfig) for every KubernetesCluster into your local tooling",
+	Long: `Fetches credentials for all KubernetesCluster objects and merges their
+kubeconfig + talosconfig into the local kubectl/talosctl configuration.
+
+Current-context is never changed. Failures are collected and reported
+at the end; all clusters are attempted regardless of individual errors.
+
+Supports -n/--namespace to restrict to a single namespace and
+-o/--output-dir to write per-cluster files instead of merging.`,
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ctx := context.Background()
+		zones, err := kube.ResolveAvailabilityZones(AvailabilityZone())
+		if err != nil {
+			return err
+		}
+		clients, err := kube.ConnectAll(ctx, zones, true, warn)
 		if err != nil {
 			return err
 		}
 
-		contextName := kcLoginContextName
-		if contextName == "" {
-			contextName = hit.cluster.Spec.Cluster.ClusterId
+		hits := collectClusters(ctx, clients, kcLoginNamespace)
+		if len(hits) == 0 {
+			return fmt.Errorf("no kubernetesclusters found")
 		}
-		if contextName == "" {
-			return fmt.Errorf("cluster %s/%s has no spec.data.clusterId and no --context-name override was given",
-				hit.cluster.Namespace, hit.cluster.Name)
-		}
-
-		kubectlOK, talosctlOK := checkLoginCLIs(cmd, hit.cluster.Spec.Cluster.Provider)
-		if !kubectlOK && !talosctlOK {
-			return fmt.Errorf("neither kubectl nor talosctl is on PATH — nothing to configure")
+		if err := sortByKeys(hits, "name", kcComparators()); err != nil {
+			return err
 		}
 
-		// --- kubeconfig -----------------------------------------------------
-		if kubectlOK {
-			if err := doKubeconfig(cmd, secret, contextName); err != nil {
-				return err
+		var errs []string
+		for i := range hits {
+			if err := loginCluster(cmd, ctx, &hits[i], true); err != nil {
+				name := hits[i].cluster.Name
+				_, _ = fmt.Fprintf(cmd.OutOrStderr(), "⚠️  %s: %v\n", name, err)
+				errs = append(errs, fmt.Sprintf("%s: %v", name, err))
 			}
 		}
-
-		// --- talosconfig (Talos clusters only) ------------------------------
-		if hit.cluster.Spec.Cluster.Provider == vitiv1alpha1.KubernetesProviderTypeTalos {
-			if talosctlOK {
-				if err := doTalosconfig(cmd, ctx, hit, secret, contextName); err != nil {
-					return err
-				}
-			}
+		if len(errs) > 0 {
+			return fmt.Errorf("%d cluster(s) failed:\n  %s", len(errs), strings.Join(errs, "\n  "))
 		}
 		return nil
 	},
+}
+
+// loginCluster fetches the credentials secret for hit and merges the
+// kubeconfig (and talosconfig for Talos clusters) into the local tooling.
+// noActivate forces current-context to remain unchanged regardless of the
+// --no-activate flag.
+func loginCluster(cmd *cobra.Command, ctx context.Context, hit *kcHit, noActivate bool) error {
+	secret, err := extract.FindClusterSecret(ctx, hit.client.Ctrl, hit.cluster)
+	if err != nil {
+		return err
+	}
+
+	contextName := kcLoginContextName
+	if contextName == "" {
+		contextName = hit.cluster.Spec.Cluster.ClusterId
+	}
+	if contextName == "" {
+		return fmt.Errorf("cluster %s/%s has no spec.data.clusterId and no --context-name override was given",
+			hit.cluster.Namespace, hit.cluster.Name)
+	}
+
+	kubectlOK, talosctlOK := checkLoginCLIs(cmd, hit.cluster.Spec.Cluster.Provider)
+	if !kubectlOK && !talosctlOK {
+		return fmt.Errorf("neither kubectl nor talosctl is on PATH — nothing to configure")
+	}
+
+	if kubectlOK {
+		if err := doKubeconfig(cmd, secret, contextName, noActivate); err != nil {
+			return err
+		}
+	}
+
+	if hit.cluster.Spec.Cluster.Provider == vitiv1alpha1.KubernetesProviderTypeTalos {
+		if talosctlOK {
+			if err := doTalosconfig(cmd, ctx, hit, secret, contextName, noActivate); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // fzfSelectCluster launches an interactive fzf picker over the provided hits
@@ -186,7 +238,7 @@ func checkLoginCLIs(cmd *cobra.Command, provider vitiv1alpha1.KubernetesProvider
 	return kubectlOK, talosctlOK
 }
 
-func doKubeconfig(cmd *cobra.Command, secret *corev1.Secret, contextName string) error {
+func doKubeconfig(cmd *cobra.Command, secret *corev1.Secret, contextName string, noActivate bool) error {
 	kc := secret.Data[extract.KeyKubeConfig]
 	if len(kc) == 0 {
 		_, _ = fmt.Fprintln(cmd.OutOrStderr(), "⚠️  secret has no kube.config entry — skipping kubeconfig step")
@@ -200,7 +252,8 @@ func doKubeconfig(cmd *cobra.Command, secret *corev1.Secret, contextName string)
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "📄 wrote %s (context %q)\n", path, contextName)
 		return nil
 	}
-	out, err := login.MergeKubeconfig(kc, contextName, "", !kcLoginNoActivate, true)
+	activate := !kcLoginNoActivate && !noActivate
+	out, err := login.MergeKubeconfig(kc, contextName, "", activate, true)
 	if err != nil {
 		return fmt.Errorf("merging kubeconfig: %w", err)
 	}
@@ -215,7 +268,7 @@ func doKubeconfig(cmd *cobra.Command, secret *corev1.Secret, contextName string)
 	return nil
 }
 
-func doTalosconfig(cmd *cobra.Command, ctx context.Context, hit *kcHit, secret *corev1.Secret, contextName string) error {
+func doTalosconfig(cmd *cobra.Command, ctx context.Context, hit *kcHit, secret *corev1.Secret, contextName string, noActivate bool) error {
 	tc := secret.Data[extract.KeyTalosconfig]
 	if len(tc) == 0 {
 		_, _ = fmt.Fprintln(cmd.OutOrStderr(), "⚠️  secret has no talosconfig entry — skipping talosconfig step")
@@ -264,7 +317,8 @@ func doTalosconfig(cmd *cobra.Command, ctx context.Context, hit *kcHit, secret *
 		return nil
 	}
 
-	out, err := login.MergeTalosconfig(tc, contextName, endpoints, "", !kcLoginNoActivate, true)
+	activate := !kcLoginNoActivate && !noActivate
+	out, err := login.MergeTalosconfig(tc, contextName, endpoints, "", activate, true)
 	if err != nil {
 		return fmt.Errorf("merging talosconfig: %w", err)
 	}
@@ -296,6 +350,18 @@ func init() {
 		"include the CPVIP load-balancer address(es) in the resolved talos endpoints (default: control-plane node IPs only)")
 	kcLoginCmd.Flags().BoolVar(&kcLoginIPv6, "ipv6", false,
 		"include IPv6 control-plane endpoints (default: IPv4 only)")
-
 	kubernetesClusterCmd.AddCommand(kcLoginCmd)
+
+	kcLoginAllCmd.Flags().StringVarP(&kcLoginNamespace, "namespace", "n", "", "namespace of the KubernetesCluster")
+	kcLoginAllCmd.Flags().StringVarP(&kcLoginOutputDir, "output-dir", "o", "",
+		"write kubeconfig-<clusterId> / talosconfig-<clusterId> files into this directory instead of merging")
+	kcLoginAllCmd.Flags().StringArrayVar(&kcLoginEndpoints, "endpoint", nil,
+		"explicit talos endpoint (repeatable); overrides auto-resolution")
+	kcLoginAllCmd.Flags().StringVar(&kcLoginEndpointFrom, "endpoint-from", "",
+		"set to \"secret\" to keep the talosconfig's original endpoints (default: auto-resolve from CPVIP / Machines)")
+	kcLoginAllCmd.Flags().BoolVar(&kcLoginUseVIP, "use-vip", false,
+		"include the CPVIP load-balancer address(es) in the resolved talos endpoints (default: control-plane node IPs only)")
+	kcLoginAllCmd.Flags().BoolVar(&kcLoginIPv6, "ipv6", false,
+		"include IPv6 control-plane endpoints (default: IPv4 only)")
+	kubernetesClusterCmd.AddCommand(kcLoginAllCmd)
 }
