@@ -45,6 +45,47 @@ func RunDashboard(talosconfigPath string, endpoints, nodes []string) error {
 	return runTalosctl(args...)
 }
 
+// Health runs `talosctl health` against the cluster to perform the deep,
+// server-side health checks (etcd quorum, all members up, all k8s nodes
+// Ready, control-plane static pods and core components healthy, …).
+//
+// talosconfigPath is passed via --talosconfig so this works without a prior
+// "viti kc login". endpoints populates --endpoints (the Talos API addresses
+// to connect through). controlPlaneNodes / workerNodes populate
+// --control-plane-nodes / --worker-nodes so talosctl checks exactly the
+// cluster's machines rather than relying on the discovery service; either
+// may be empty when its set could not be resolved. Output streams to the
+// caller's stdio.
+//
+// talosctl health also requires --nodes (the node it directs the API calls
+// at, distinct from the *-nodes check sets); we target a control-plane node
+// when known, falling back to the first endpoint.
+func Health(talosconfigPath string, endpoints, controlPlaneNodes, workerNodes []string) error {
+	if talosconfigPath == "" {
+		return fmt.Errorf("talosconfigPath is required")
+	}
+	if len(endpoints) == 0 {
+		return fmt.Errorf("at least one --endpoint is required to run a Talos health check")
+	}
+	node := endpoints[0]
+	if len(controlPlaneNodes) > 0 {
+		node = controlPlaneNodes[0]
+	}
+	args := []string{
+		"health",
+		"--talosconfig", talosconfigPath,
+		"--endpoints", strings.Join(endpoints, ","),
+		"--nodes", node,
+	}
+	if len(controlPlaneNodes) > 0 {
+		args = append(args, "--control-plane-nodes", strings.Join(controlPlaneNodes, ","))
+	}
+	if len(workerNodes) > 0 {
+		args = append(args, "--worker-nodes", strings.Join(workerNodes, ","))
+	}
+	return runTalosctl(args...)
+}
+
 // runTalosctl is the shared entry point for any talosctl subcommand this
 // package exposes. Kept centralised so future additions (reboot, etcd
 // backup, etc.) pick up the same stdio wiring and error handling.

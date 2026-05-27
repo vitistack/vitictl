@@ -216,6 +216,44 @@ func ResolveClusterMachineNodes(ctx context.Context, c ctrlclient.Client, namesp
 	return dedupeKeepOrder(addrs), "", nil
 }
 
+// ResolveNodeRoles returns the cluster's node IPs split by role: control
+// planes (Machines named <clusterId>-ctp*) and everything else (workers).
+// It lists Machines once and is the right input for
+// `talosctl health --control-plane-nodes … --worker-nodes …`.
+//
+// includeIPv6 follows the same default-off semantics as the rest of this
+// package (see filterIPFamily). A non-fatal warning is returned when no
+// Machines match; a hard List failure is returned as err.
+func ResolveNodeRoles(ctx context.Context, c ctrlclient.Client, namespace, clusterID string, includeIPv6 bool) (controlPlane, workers []string, warning string, err error) {
+	if clusterID == "" {
+		return nil, nil, "", fmt.Errorf("clusterId is empty")
+	}
+	var list vitiv1alpha1.MachineList
+	if err := c.List(ctx, &list, ctrlclient.InNamespace(namespace)); err != nil {
+		return nil, nil, "", fmt.Errorf("listing Machines: %w", err)
+	}
+	prefix := clusterID + "-"
+	cpPrefix := clusterID + ControlPlaneNameSuffix
+	var seen int
+	for i := range list.Items {
+		m := &list.Items[i]
+		if !strings.HasPrefix(m.Name, prefix) {
+			continue
+		}
+		seen++
+		ips := filterIPFamily(MachineNodeIPs(m), includeIPv6)
+		if strings.HasPrefix(m.Name, cpPrefix) {
+			controlPlane = append(controlPlane, ips...)
+		} else {
+			workers = append(workers, ips...)
+		}
+	}
+	if seen == 0 {
+		return nil, nil, fmt.Sprintf("no Machines matched %s* in namespace %s", prefix, namespace), nil
+	}
+	return dedupeKeepOrder(controlPlane), dedupeKeepOrder(workers), "", nil
+}
+
 // MachineNodeIPs returns the deduped list of node-level IP addresses for m.
 // "Node-level" means addresses that belong to a real NIC — not pod CNI
 // bridges, kube-proxy dummy interfaces, per-pod veth pairs, or libvirt/ovs
