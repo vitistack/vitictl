@@ -350,14 +350,14 @@ func renderHealthRows(cmd *cobra.Command, rows []healthRow, output string) error
 		return err
 	case "", "table":
 		tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-		_, _ = fmt.Fprintln(tw, "AZ\tNAME\tCLUSTER ID\tNAMESPACE\tSTATUS\tMESSAGE")
+		_, _ = fmt.Fprintln(tw, "NAMESPACE\tNAME\tCLUSTER ID\tAZ\tSTATUS\tMESSAGE")
 		for _, r := range rows {
 			status := "❌"
 			if r.OK {
 				status = "✅"
 			}
 			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
-				r.AvailabilityZone, r.Cluster, valueOrDash(r.ClusterID), r.Namespace, status, valueOrDash(r.Message))
+				r.Namespace, r.Cluster, valueOrDash(r.ClusterID), r.AvailabilityZone, status, valueOrDash(r.Message))
 		}
 		return tw.Flush()
 	default:
