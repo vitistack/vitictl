@@ -7,7 +7,7 @@ godebug default=go1.26
 require (
 	github.com/atotto/clipboard v0.1.4
 	github.com/gizak/termui/v3 v3.1.0
-	github.com/sahilm/fuzzy v0.1.2
+	github.com/sahilm/fuzzy v0.1.3
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
 	github.com/vitistack/common v0.8.70
