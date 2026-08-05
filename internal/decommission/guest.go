@@ -145,6 +145,7 @@ func (r *Runner) deleteIngresses(ctx context.Context) {
 	}
 	for i := range ingresses.Items {
 		ing := &ingresses.Items[i]
+		r.printf("  Deleting ingress %s in %s", ing.Name, ing.Namespace)
 		if err := ignoreNotFound(r.guest.Delete(ctx, ing)); err != nil {
 			r.failf("failed to delete ingress %s/%s: %v", ing.Namespace, ing.Name, err)
 		}

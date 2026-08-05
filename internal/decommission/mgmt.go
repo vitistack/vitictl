@@ -83,14 +83,15 @@ func (r *Runner) teardown(ctx context.Context) error {
 	// deletion — known cosmetic operator bug) and is deliberately ignored.
 	// The CRD only exists where the static-ip-operator is rolled out.
 	leaked, checked := r.remainingIPAllocations(ctx)
-	if checked {
-		if len(leaked) > 0 {
-			for _, name := range leaked {
-				r.failf("node-IP allocation still present (real leak): %s", name)
-			}
-		} else {
-			r.printf("  node-IP allocations released (no IPAllocation records remain for %s)", r.clusterID)
+	switch {
+	case !checked:
+		r.printf("  IPAllocation CRD not present on this zone (static-ip-operator not rolled out) — node-IP check skipped")
+	case len(leaked) > 0:
+		for _, name := range leaked {
+			r.failf("node-IP allocation still present (real leak): %s", name)
 		}
+	default:
+		r.printf("  node-IP allocations released (no IPAllocation records remain for %s)", r.clusterID)
 	}
 
 	return r.verifyTeardown(ctx)
