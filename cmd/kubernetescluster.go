@@ -15,6 +15,7 @@ import (
 	"github.com/vitistack/vitictl/internal/fuzzy"
 	"github.com/vitistack/vitictl/internal/kube"
 	"github.com/vitistack/vitictl/internal/printer"
+	"github.com/vitistack/vitictl/internal/talos"
 )
 
 var kubernetesClusterCmd = &cobra.Command{
@@ -362,19 +363,22 @@ func renderClusters(cmd *cobra.Command, hits []kcHit, format printer.Format) err
 
 func writeClusterTable(cmd *cobra.Command, hits []kcHit, wide bool) error {
 	tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+	var talosVersions map[string]string
 	if wide {
-		_, _ = fmt.Fprintln(tw, "AZ\tNAMESPACE\tNAME\tCLUSTER ID\tPROVIDER\tPHASE\tREGION\tENV\tVERSION\tCP REPLICAS\tDATACENTER\tAGE")
+		talosVersions = collectDeclaredTalosVersions(cmd.Context(), hits)
+		_, _ = fmt.Fprintln(tw, "AZ\tNAMESPACE\tNAME\tCLUSTER ID\tPROVIDER\tPHASE\tREGION\tENV\tVERSION\tTALOS\tCP REPLICAS\tDATACENTER\tAGE")
 	} else {
 		_, _ = fmt.Fprintln(tw, "AZ\tNAMESPACE\tNAME\tCLUSTER ID\tPROVIDER\tPHASE\tREGION\tENV")
 	}
 	for _, h := range hits {
 		it := h.cluster
 		if wide {
-			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
 				h.client.AZ.Name, it.Namespace, it.Name,
 				it.Spec.Cluster.ClusterId, string(it.Spec.Cluster.Provider),
 				it.Status.Phase, it.Spec.Cluster.Region, it.Spec.Cluster.Environment,
 				valueOrDash(it.Spec.Topology.Version),
+				valueOrDash(talosVersions[h.client.AZ.Name+"/"+it.Namespace+"/"+it.Spec.Cluster.ClusterId]),
 				it.Spec.Topology.ControlPlane.Replicas,
 				valueOrDash(it.Spec.Cluster.Datacenter),
 				printer.Age(it.CreationTimestamp),
@@ -388,6 +392,51 @@ func writeClusterTable(cmd *cobra.Command, hits []kcHit, wide bool) error {
 		}
 	}
 	return tw.Flush()
+}
+
+// collectDeclaredTalosVersions returns the DECLARED Talos version per cluster
+// (key: az/namespace/clusterId), parsed from the machines' spec.os.imageID —
+// the field the operator drives provisioning and upgrades from. Machines are
+// listed once per az/namespace pair, not per cluster. Mixed versions (rolling
+// upgrade in flight) render comma-joined. Best-effort: an unreachable list
+// just leaves the column blank for those clusters.
+//
+// Note this is desired state, not runtime truth — "viti kc health" reports
+// the runtime version from the guest's kubelets and flags drift.
+func collectDeclaredTalosVersions(ctx context.Context, hits []kcHit) map[string]string {
+	type nsKey struct {
+		az, namespace string
+	}
+	machinesByNS := map[nsKey][]vitiv1alpha1.Machine{}
+	listed := map[nsKey]bool{}
+
+	out := make(map[string]string, len(hits))
+	for _, h := range hits {
+		if h.cluster.Spec.Cluster.Provider != vitiv1alpha1.KubernetesProviderTypeTalos {
+			continue
+		}
+		k := nsKey{h.client.AZ.Name, h.cluster.Namespace}
+		if !listed[k] {
+			listed[k] = true
+			var ml vitiv1alpha1.MachineList
+			if err := h.client.Ctrl.List(ctx, &ml, ctrlclient.InNamespace(k.namespace)); err == nil {
+				machinesByNS[k] = ml.Items
+			}
+		}
+		clusterID := h.cluster.Spec.Cluster.ClusterId
+		versions := map[string]struct{}{}
+		for i := range machinesByNS[k] {
+			m := &machinesByNS[k][i]
+			if !strings.HasPrefix(m.Name, clusterID+"-") {
+				continue
+			}
+			if v := talos.VersionFromImageID(m.Spec.OS.ImageID); v != "" {
+				versions[v] = struct{}{}
+			}
+		}
+		out[k.az+"/"+k.namespace+"/"+clusterID] = talos.JoinVersions(versions)
+	}
+	return out
 }
 
 func printKubernetesCluster(cmd *cobra.Command, azName string, kc *vitiv1alpha1.KubernetesCluster) {

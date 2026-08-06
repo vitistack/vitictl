@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
 	vitiv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
@@ -86,6 +87,10 @@ Exits non-zero when the cluster is unhealthy.`,
 			hit.cluster.Namespace, hit.cluster.Name, hit.cluster.Spec.Cluster.ClusterId,
 			hit.client.AZ.Name, hit.cluster.Spec.Cluster.Provider)
 
+		if hit.cluster.Spec.Cluster.Provider == vitiv1alpha1.KubernetesProviderTypeTalos {
+			printTalosVersionStatus(ctx, cmd, hit, secret)
+		}
+
 		if kcHealthFull && hit.cluster.Spec.Cluster.Provider == vitiv1alpha1.KubernetesProviderTypeTalos {
 			return talosFullHealth(ctx, cmd, hit, secret)
 		}
@@ -160,6 +165,64 @@ func apiServerHealth(ctx context.Context, cmd *cobra.Command, secret *corev1.Sec
 	}
 	_, _ = fmt.Fprintln(out, "🟢 cluster is healthy")
 	return nil
+}
+
+// printTalosVersionStatus reports the cluster's Talos version from two
+// angles and flags drift between them:
+//
+//   - runtime: what the kubelets actually report (node status.nodeInfo
+//     .osImage, via the guest's Kubernetes API — no Talos API involved)
+//   - declared: what the machines' spec.os.imageID says the operator is
+//     driving toward
+//
+// Drift is informational, not a health failure: it is expected mid-upgrade,
+// and a wedged upgrade shows up as persistent drift — which is exactly why
+// it is worth printing. Best-effort: any lookup problem prints a note and
+// never fails the health run.
+func printTalosVersionStatus(ctx context.Context, cmd *cobra.Command, hit *kcHit, secret *corev1.Secret) {
+	out := cmd.OutOrStdout()
+
+	declared := map[string]struct{}{}
+	var machines vitiv1alpha1.MachineList
+	if err := hit.client.Ctrl.List(ctx, &machines, ctrlclient.InNamespace(hit.cluster.Namespace)); err == nil {
+		for i := range machines.Items {
+			m := &machines.Items[i]
+			if !strings.HasPrefix(m.Name, hit.cluster.Spec.Cluster.ClusterId+"-") {
+				continue
+			}
+			if v := talos.VersionFromImageID(m.Spec.OS.ImageID); v != "" {
+				declared[v] = struct{}{}
+			}
+		}
+	}
+
+	runtimeVersions := map[string]struct{}{}
+	if kcBytes := secret.Data[extract.KeyKubeConfig]; len(kcBytes) > 0 {
+		if cfg, err := health.RESTConfigFromKubeconfig(kcBytes); err == nil {
+			if images, err := health.NodeOSImages(ctx, cfg); err == nil {
+				for img := range images {
+					if v := talos.VersionFromOSImage(img); v != "" {
+						runtimeVersions[v] = struct{}{}
+					}
+				}
+			}
+		}
+	}
+
+	run := talos.JoinVersions(runtimeVersions)
+	dec := talos.JoinVersions(declared)
+	switch {
+	case run == "" && dec == "":
+		return // nothing determinable; stay quiet rather than noisy
+	case run == "":
+		_, _ = fmt.Fprintf(out, "🧬 talos — declared v%s (runtime version unavailable)\n", dec)
+	case dec == "":
+		_, _ = fmt.Fprintf(out, "🧬 talos — runtime v%s (declared version unavailable)\n", run)
+	case run == dec:
+		_, _ = fmt.Fprintf(out, "🧬 talos — v%s (runtime matches declared)\n", run)
+	default:
+		_, _ = fmt.Fprintf(out, "⚠️  talos — runtime v%s ≠ declared v%s (upgrade in flight or wedged)\n", run, dec)
+	}
 }
 
 // talosFullHealth resolves reachable control-plane endpoints and the
