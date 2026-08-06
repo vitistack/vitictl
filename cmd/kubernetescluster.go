@@ -99,20 +99,42 @@ func collectClusters(
 	clients []*kube.Client,
 	namespace string,
 ) []kcHit {
+	// Query all availability zones concurrently — wall clock is the slowest
+	// zone, not the sum. Results keep the original client order so output
+	// stays deterministic; errors are surfaced after the fan-in (warn is not
+	// assumed goroutine-safe).
+	perClient := make([][]kcHit, len(clients))
+	errs := make([]error, len(clients))
+	var wg sync.WaitGroup
+	for idx, c := range clients {
+		wg.Add(1)
+		go func(idx int, c *kube.Client) {
+			defer wg.Done()
+			var list vitiv1alpha1.KubernetesClusterList
+			opts := []ctrlclient.ListOption{}
+			if namespace != "" {
+				opts = append(opts, ctrlclient.InNamespace(namespace))
+			}
+			if err := c.Ctrl.List(ctx, &list, opts...); err != nil {
+				errs[idx] = fmt.Errorf("availability zone %q: listing kubernetesclusters: %w", c.AZ.Name, err)
+				return
+			}
+			hits := make([]kcHit, 0, len(list.Items))
+			for i := range list.Items {
+				hits = append(hits, kcHit{client: c, cluster: &list.Items[i]})
+			}
+			perClient[idx] = hits
+		}(idx, c)
+	}
+	wg.Wait()
+
 	var hits []kcHit
-	for _, c := range clients {
-		var list vitiv1alpha1.KubernetesClusterList
-		opts := []ctrlclient.ListOption{}
-		if namespace != "" {
-			opts = append(opts, ctrlclient.InNamespace(namespace))
-		}
-		if err := c.Ctrl.List(ctx, &list, opts...); err != nil {
-			warn(fmt.Errorf("availability zone %q: listing kubernetesclusters: %w", c.AZ.Name, err))
+	for idx := range clients {
+		if errs[idx] != nil {
+			warn(errs[idx])
 			continue
 		}
-		for i := range list.Items {
-			hits = append(hits, kcHit{client: c, cluster: &list.Items[i]})
-		}
+		hits = append(hits, perClient[idx]...)
 	}
 	return hits
 }

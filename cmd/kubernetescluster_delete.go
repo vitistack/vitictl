@@ -25,8 +25,14 @@ var (
 	kcDeleteNamespace      string
 	kcDeleteYes            bool
 	kcDeleteSkipPreclean   bool
+	kcDeleteDryRun         bool
 	kcDeleteMachineTimeout time.Duration
 	kcDeleteRORURL         string
+
+	kcPrecleanAZ        string
+	kcPrecleanNamespace string
+	kcPrecleanYes       bool
+	kcPrecleanRORURL    string
 )
 
 var kcDeleteCmd = &cobra.Command{
@@ -76,29 +82,104 @@ Pass --yes to skip the confirmation prompt.`,
 		var guest ctrlclient.Client
 		if !kcDeleteSkipPreclean {
 			guest, err = buildGuestClient(ctx, hit)
-			if err != nil {
+			if err != nil && !kcDeleteDryRun {
 				return fmt.Errorf("cannot reach the guest cluster for preclean: %w\n"+
 					"If the guest is genuinely gone/unreachable and you accept leaking its external state, re-run with --skip-preclean", err)
 			}
-		}
-
-		printKcDeleteSummary(cmd, hit)
-		if !kcDeleteYes {
-			if err := confirmKcDelete(cmd, name); err != nil {
-				return err
+			if err != nil {
+				// Dry-run reports this as a failed check instead of aborting.
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "⚠️  %v\n", err)
 			}
 		}
 
 		runner, err := decommission.New(hit.client.Ctrl, guest, hit.cluster, decommission.Options{
 			Out:            cmd.OutOrStdout(),
 			RORAPIURL:      kcDeleteRORURL,
-			SkipPreclean:   kcDeleteSkipPreclean,
+			SkipPreclean:   kcDeleteSkipPreclean || (kcDeleteDryRun && guest == nil),
 			MachineTimeout: kcDeleteMachineTimeout,
 		})
 		if err != nil {
 			return err
 		}
+
+		if kcDeleteDryRun {
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "🔍 dry run — verifying prerequisites, changing nothing\n")
+			return runner.Preflight(ctx)
+		}
+
+		printKcDeleteSummary(cmd, hit)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "This deletes the VMs and is IRREVERSIBLE.\n")
+		if !kcDeleteYes {
+			if err := confirmKcDelete(cmd, name); err != nil {
+				return err
+			}
+		}
 		return runner.Run(ctx)
+	},
+}
+
+var kcPrecleanCmd = &cobra.Command{
+	Use:   "preclean <name>",
+	Short: "Clean up inside a guest cluster ahead of deletion (phase 1 only)",
+	Long: `Runs only phase 1 of the decommission: cleans up inside the guest
+cluster so external systems release their state (ArgoCD stopped,
+ingresses/gateways/LoadBalancer services deleted for IPAM + DNS cleanup,
+PVCs deleted and waited on until external volumes are gone, cluster purged
+from ROR) — and stops there.
+
+The KubernetesCluster and its VMs are left untouched: use this when the
+irreversible deletion happens later (e.g. in a change window), then finish
+with 'viti kc delete --skip-preclean <name>'.
+
+Re-runnable. Workloads in the guest are disrupted (this IS the teardown of
+its services), but nothing is unrecoverable until 'kc delete'. Requires a
+fresh 'ror login'.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		name := args[0]
+		ctx := context.Background()
+
+		zones, err := kube.ResolveAvailabilityZones(kcPrecleanAZ)
+		if err != nil {
+			return err
+		}
+		clients, err := kube.ConnectAll(ctx, zones, true, func(err error) {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "⚠️  %v\n", err)
+		})
+		if err != nil {
+			return err
+		}
+		hit, err := findClusterAcrossAZs(ctx, clients, name, kcPrecleanNamespace)
+		if err != nil {
+			return err
+		}
+		guest, err := buildGuestClient(ctx, hit)
+		if err != nil {
+			return fmt.Errorf("cannot reach the guest cluster: %w", err)
+		}
+
+		printKcDeleteSummary(cmd, hit)
+		if !kcPrecleanYes {
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(),
+				"Preclean disrupts the guest's services (external cleanup) but deletes no VMs.\n")
+			if err := confirmKcDelete(cmd, name); err != nil {
+				return err
+			}
+		}
+
+		runner, err := decommission.New(hit.client.Ctrl, guest, hit.cluster, decommission.Options{
+			Out:       cmd.OutOrStdout(),
+			RORAPIURL: kcPrecleanRORURL,
+		})
+		if err != nil {
+			return err
+		}
+		if err := runner.RunPreclean(ctx); err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(),
+			"Finish later with: viti kc delete --skip-preclean %s\n", name)
+		return nil
 	},
 }
 
@@ -155,7 +236,7 @@ func printKcDeleteSummary(cmd *cobra.Command, hit *kcHit) {
 	if kcDeleteSkipPreclean {
 		_, _ = fmt.Fprintf(out, "\n⚠️  --skip-preclean: external state held by the guest (IPAM, DNS, volumes, ROR) will NOT be cleaned up.\n")
 	}
-	_, _ = fmt.Fprintf(out, "\nThis deletes the VMs and is IRREVERSIBLE.\n")
+	_, _ = fmt.Fprintln(out)
 }
 
 // confirmKcDelete requires the operator to type the cluster name back —
@@ -182,5 +263,13 @@ func init() {
 		"skip phase 1 (guest cleanup) — external state held by the guest will NOT be cleaned up")
 	kcDeleteCmd.Flags().DurationVar(&kcDeleteMachineTimeout, "machine-timeout", 15*time.Minute, "how long to wait for VM teardown")
 	kcDeleteCmd.Flags().StringVar(&kcDeleteRORURL, "ror-url", "", "ROR API base URL (default https://api.ror.nhn.no)")
-	kubernetesClusterCmd.AddCommand(kcDeleteCmd)
+	kcDeleteCmd.Flags().BoolVar(&kcDeleteDryRun, "dry-run", false,
+		"verify every prerequisite (CR, machines, guest reachability, ROR identity/token/registry) and exit without changing anything")
+
+	kcPrecleanCmd.Flags().StringVarP(&kcPrecleanAZ, "availabilityzone", "z", "", "restrict the search to a single availability zone")
+	kcPrecleanCmd.Flags().StringVarP(&kcPrecleanNamespace, "namespace", "n", "", "namespace of the KubernetesCluster")
+	kcPrecleanCmd.Flags().BoolVar(&kcPrecleanYes, "yes", false, "skip the confirmation prompt")
+	kcPrecleanCmd.Flags().StringVar(&kcPrecleanRORURL, "ror-url", "", "ROR API base URL (default https://api.ror.nhn.no)")
+
+	kubernetesClusterCmd.AddCommand(kcDeleteCmd, kcPrecleanCmd)
 }

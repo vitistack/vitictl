@@ -172,3 +172,14 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	return r.teardown(ctx)
 }
+
+// RunPreclean executes only phase 1 (guest cleanup + ROR deregistration),
+// leaving the KubernetesCluster and its VMs untouched — for decommissions
+// where the irreversible deletion happens later (e.g. in a change window).
+// Re-runnable: a clean verdict stays clean on repeat runs.
+func (r *Runner) RunPreclean(ctx context.Context) error {
+	if r.guest == nil {
+		return fmt.Errorf("no guest client — preclean needs the guest cluster to be reachable")
+	}
+	return r.preclean(ctx)
+}
