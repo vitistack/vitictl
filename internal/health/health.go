@@ -161,3 +161,22 @@ func FailedChecks(body string) []string {
 	}
 	return failed
 }
+
+// NodeOSImages returns the unique set of status.nodeInfo.osImage strings
+// reported by the cluster's kubelets (e.g. "Talos (v1.13.7)"). Uses only the
+// Kubernetes API — no Talos API involvement.
+func NodeOSImages(ctx context.Context, cfg *rest.Config) (map[string]struct{}, error) {
+	cs, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	nodes, err := cs.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("listing nodes: %w", err)
+	}
+	images := make(map[string]struct{})
+	for i := range nodes.Items {
+		images[nodes.Items[i].Status.NodeInfo.OSImage] = struct{}{}
+	}
+	return images, nil
+}
