@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -396,45 +398,61 @@ func writeClusterTable(cmd *cobra.Command, hits []kcHit, wide bool) error {
 
 // collectDeclaredTalosVersions returns the DECLARED Talos version per cluster
 // (key: az/namespace/clusterId), parsed from the machines' spec.os.imageID —
-// the field the operator drives provisioning and upgrades from. Machines are
-// listed once per az/namespace pair, not per cluster. Mixed versions (rolling
-// upgrade in flight) render comma-joined. Best-effort: an unreachable list
-// just leaves the column blank for those clusters.
+// the field the operator drives provisioning and upgrades from.
+//
+// Cost: exactly ONE all-namespaces machine List per availability zone, all
+// zones queried in parallel with a bounded timeout — the column adds roughly
+// one round-trip of wall clock, not one per namespace. Best-effort: an
+// unreachable zone just leaves the column blank for its clusters.
 //
 // Note this is desired state, not runtime truth — "viti kc health" reports
 // the runtime version from the guest's kubelets and flags drift.
 func collectDeclaredTalosVersions(ctx context.Context, hits []kcHit) map[string]string {
-	type nsKey struct {
-		az, namespace string
+	// Unique clients (one per AZ present in the hits).
+	clientsByAZ := map[string]*kube.Client{}
+	for _, h := range hits {
+		clientsByAZ[h.client.AZ.Name] = h.client
 	}
-	machinesByNS := map[nsKey][]vitiv1alpha1.Machine{}
-	listed := map[nsKey]bool{}
+
+	var (
+		mu           sync.Mutex
+		machinesByAZ = make(map[string][]vitiv1alpha1.Machine, len(clientsByAZ))
+		wg           sync.WaitGroup
+	)
+	for az, c := range clientsByAZ {
+		wg.Add(1)
+		go func(az string, c *kube.Client) {
+			defer wg.Done()
+			lctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			defer cancel()
+			var ml vitiv1alpha1.MachineList
+			if err := c.Ctrl.List(lctx, &ml); err != nil {
+				return // column stays blank for this zone
+			}
+			mu.Lock()
+			machinesByAZ[az] = ml.Items
+			mu.Unlock()
+		}(az, c)
+	}
+	wg.Wait()
 
 	out := make(map[string]string, len(hits))
 	for _, h := range hits {
 		if h.cluster.Spec.Cluster.Provider != vitiv1alpha1.KubernetesProviderTypeTalos {
 			continue
 		}
-		k := nsKey{h.client.AZ.Name, h.cluster.Namespace}
-		if !listed[k] {
-			listed[k] = true
-			var ml vitiv1alpha1.MachineList
-			if err := h.client.Ctrl.List(ctx, &ml, ctrlclient.InNamespace(k.namespace)); err == nil {
-				machinesByNS[k] = ml.Items
-			}
-		}
 		clusterID := h.cluster.Spec.Cluster.ClusterId
 		versions := map[string]struct{}{}
-		for i := range machinesByNS[k] {
-			m := &machinesByNS[k][i]
-			if !strings.HasPrefix(m.Name, clusterID+"-") {
+		for i := range machinesByAZ[h.client.AZ.Name] {
+			m := &machinesByAZ[h.client.AZ.Name][i]
+			if m.Namespace != h.cluster.Namespace || !strings.HasPrefix(m.Name, clusterID+"-") {
 				continue
 			}
 			if v := talos.VersionFromImageID(m.Spec.OS.ImageID); v != "" {
 				versions[v] = struct{}{}
 			}
 		}
-		out[k.az+"/"+k.namespace+"/"+clusterID] = talos.JoinVersions(versions)
+		out[h.client.AZ.Name+"/"+h.cluster.Namespace+"/"+clusterID] = talos.JoinVersions(versions)
 	}
 	return out
 }
