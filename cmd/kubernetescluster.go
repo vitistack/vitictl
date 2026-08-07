@@ -418,17 +418,19 @@ func writeClusterTable(cmd *cobra.Command, hits []kcHit, wide bool) error {
 	return tw.Flush()
 }
 
-// collectDeclaredTalosVersions returns the DECLARED Talos version per cluster
-// (key: az/namespace/clusterId), parsed from the machines' spec.os.imageID —
-// the field the operator drives provisioning and upgrades from.
+// collectDeclaredTalosVersions renders the TALOS column per cluster (key:
+// az/namespace/clusterId):
 //
-// Cost: exactly ONE all-namespaces machine List per availability zone, all
-// zones queried in parallel with a bounded timeout — the column adds roughly
-// one round-trip of wall clock, not one per namespace. Best-effort: an
-// unreachable zone just leaves the column blank for its clusters.
+//	"1.12.7"          runtime, operator-verified (TalosVersionEnforcement)
+//	"1.12.7→1.13.7"   runs 1.12.7, upgrade to 1.13.7 available/pending
+//	"~1.13.7"         unverified — machine image target only (no condition)
 //
-// Note this is desired state, not runtime truth — "viti kc health" reports
-// the runtime version from the guest's kubelets and flags drift.
+// Cost: the runtime version comes from a condition on the CRs the list
+// already holds (free); the target needs ONE all-namespaces machine List per
+// availability zone, all zones queried in parallel with a bounded timeout.
+// Best-effort: an unreachable zone just weakens the column for its clusters.
+//
+// "viti kc health" independently verifies runtime via the guest's kubelets.
 func collectDeclaredTalosVersions(ctx context.Context, hits []kcHit) map[string]string {
 	// Unique clients (one per AZ present in the hits).
 	clientsByAZ := map[string]*kube.Client{}
@@ -464,17 +466,43 @@ func collectDeclaredTalosVersions(ctx context.Context, hits []kcHit) map[string]
 			continue
 		}
 		clusterID := h.cluster.Spec.Cluster.ClusterId
-		versions := map[string]struct{}{}
+
+		// Runtime: the operator-verified version from the
+		// TalosVersionEnforcement condition — already on the CR, zero cost.
+		var runtime string
+		for _, c := range h.cluster.Status.Conditions {
+			if c.Type == "TalosVersionEnforcement" {
+				runtime = talos.VersionFromEnforcement(c.Message)
+				break
+			}
+		}
+
+		// Target: what the machines' image URLs point at. The operator bumps
+		// this to the newest AVAILABLE image ahead of any actual upgrade, so
+		// alone it overstates reality — it only ever renders as the drift
+		// target or, marked uncertain, as a fallback.
+		targets := map[string]struct{}{}
 		for i := range machinesByAZ[h.client.AZ.Name] {
 			m := &machinesByAZ[h.client.AZ.Name][i]
 			if m.Namespace != h.cluster.Namespace || !strings.HasPrefix(m.Name, clusterID+"-") {
 				continue
 			}
 			if v := talos.VersionFromImageID(m.Spec.OS.ImageID); v != "" {
-				versions[v] = struct{}{}
+				targets[v] = struct{}{}
 			}
 		}
-		out[h.client.AZ.Name+"/"+h.cluster.Namespace+"/"+clusterID] = talos.JoinVersions(versions)
+		target := talos.JoinVersions(targets)
+
+		var display string
+		switch {
+		case runtime != "" && target != "" && runtime != target:
+			display = runtime + "→" + target // runs runtime; upgrade to target pending
+		case runtime != "":
+			display = runtime
+		case target != "":
+			display = "~" + target // unverified: target image only, runtime unknown
+		}
+		out[h.client.AZ.Name+"/"+h.cluster.Namespace+"/"+clusterID] = display
 	}
 	return out
 }

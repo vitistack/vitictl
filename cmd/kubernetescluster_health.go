@@ -210,18 +210,18 @@ func printTalosVersionStatus(ctx context.Context, cmd *cobra.Command, hit *kcHit
 	}
 
 	run := talos.JoinVersions(runtimeVersions)
-	dec := talos.JoinVersions(declared)
+	target := talos.JoinVersions(declared)
 	switch {
-	case run == "" && dec == "":
+	case run == "" && target == "":
 		return // nothing determinable; stay quiet rather than noisy
 	case run == "":
-		_, _ = fmt.Fprintf(out, "🧬 talos — declared v%s (runtime version unavailable)\n", dec)
-	case dec == "":
-		_, _ = fmt.Fprintf(out, "🧬 talos — runtime v%s (declared version unavailable)\n", run)
-	case run == dec:
-		_, _ = fmt.Fprintf(out, "🧬 talos — v%s (runtime matches declared)\n", run)
+		_, _ = fmt.Fprintf(out, "🧬 talos — target image v%s (runtime version unavailable)\n", target)
+	case target == "":
+		_, _ = fmt.Fprintf(out, "🧬 talos — runtime v%s (target image unavailable)\n", run)
+	case run == target:
+		_, _ = fmt.Fprintf(out, "🧬 talos — v%s (runtime matches target image)\n", run)
 	default:
-		_, _ = fmt.Fprintf(out, "⚠️  talos — runtime v%s ≠ declared v%s (upgrade in flight or wedged)\n", run, dec)
+		_, _ = fmt.Fprintf(out, "⚠️  talos — runtime v%s, target image v%s (upgrade available/pending — persistent gap may mean wedged)\n", run, target)
 	}
 }
 
