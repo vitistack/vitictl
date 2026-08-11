@@ -25,6 +25,8 @@ import (
 	"time"
 
 	"sigs.k8s.io/yaml"
+
+	"github.com/vitistack/vitictl/internal/settings"
 )
 
 // DefaultIndexURL is where `viti plugin` fetches the curated plugin
@@ -57,6 +59,11 @@ type Index struct {
 // their zero values fall back to conventional templates derived from
 // Name and Repo.
 type Entry struct {
+	// Private keeps an entry out of `viti plugin list --available` unless
+	// --all is passed. It controls advertising, not access: the plugin still
+	// installs normally for anyone who can read its repository.
+	Private bool `json:"private,omitempty" yaml:"private,omitempty"`
+
 	Name                string `json:"name"                          yaml:"name"`
 	Repo                string `json:"repo"                          yaml:"repo"`
 	Description         string `json:"description,omitempty"         yaml:"description,omitempty"`
@@ -66,14 +73,72 @@ type Entry struct {
 	CosignIdentityRegex string `json:"cosignIdentityRegex,omitempty" yaml:"cosignIdentityRegex,omitempty"`
 }
 
-// FetchIndex downloads plugins.yaml from IndexURL and parses it.
+// extraIndexes returns additional index URLs configured by the user. It is a
+// variable so tests can supply their own.
+var extraIndexes = settings.PluginIndexes
+
+// IndexSources lists every index to read, in precedence order: the default
+// public index (or whatever VITICTL_PLUGINS_INDEX replaces it with) first,
+// then any configured in ~/.vitistack/ctl.config.yaml.
+func IndexSources() []string {
+	sources := []string{resolveIndexURL()}
+	for _, u := range extraIndexes() {
+		if u = strings.TrimSpace(u); u != "" {
+			sources = append(sources, u)
+		}
+	}
+	return sources
+}
+
+// FetchIndex reads every configured index and merges them into one.
+//
+// Later sources win on a name clash: a team's own index is more specific than
+// the shared public one, so it can override an entry. A source that cannot be
+// read is reported and skipped, so one unreachable internal index does not
+// block installing everything else; an error is returned only when nothing
+// could be read at all.
 func FetchIndex(ctx context.Context) (*Index, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, fetchTimeout)
 		defer cancel()
 	}
-	body, err := fetchIndexBody(ctx)
+
+	var (
+		merged   Index
+		position = map[string]int{}
+		failures []error
+		read     int
+	)
+	for _, src := range IndexSources() {
+		idx, err := fetchOneIndex(ctx, src)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("%s: %w", src, err))
+			_, _ = fmt.Fprintf(warnOut, "==> ⚠️  skipping plugin index %s: %v\n", src, err)
+			continue
+		}
+		read++
+		for _, e := range idx.Plugins {
+			if at, dup := position[e.Name]; dup {
+				merged.Plugins[at] = e // later source wins
+				continue
+			}
+			position[e.Name] = len(merged.Plugins)
+			merged.Plugins = append(merged.Plugins, e)
+		}
+	}
+	if read == 0 {
+		if len(failures) == 1 {
+			return nil, failures[0]
+		}
+		return nil, fmt.Errorf("no plugin index could be read: %v", errors.Join(failures...))
+	}
+	return &merged, nil
+}
+
+// fetchOneIndex downloads and validates a single index source.
+func fetchOneIndex(ctx context.Context, src string) (*Index, error) {
+	body, err := fetchIndexBody(ctx, src)
 	if err != nil {
 		return nil, err
 	}
@@ -96,9 +161,7 @@ func FetchIndex(ctx context.Context) (*Index, error) {
 // token makes raw.githubusercontent.com answer 404 rather than 401 for a
 // public file, so a narrower "only retry on 401" rule would still let a
 // leftover token break every plugin command.
-func fetchIndexBody(ctx context.Context) ([]byte, error) {
-	url := resolveIndexURL()
-
+func fetchIndexBody(ctx context.Context, url string) ([]byte, error) {
 	authorize := shouldAuthenticate(url) && token() != ""
 	body, err := getIndex(ctx, url, authorize)
 	if err == nil {
@@ -130,6 +193,19 @@ func getIndex(ctx context.Context, url string, authorize bool) ([]byte, error) {
 		return nil, fmt.Errorf("index returned %s", resp.Status)
 	}
 	return io.ReadAll(resp.Body)
+}
+
+// Listable returns the entries to show in a listing. Private entries are
+// included only when all is true.
+func (i *Index) Listable(all bool) *Index {
+	out := &Index{}
+	for _, e := range i.Plugins {
+		if e.Private && !all {
+			continue
+		}
+		out.Plugins = append(out.Plugins, e)
+	}
+	return out
 }
 
 // Find returns the entry with the given name, case-sensitively.

@@ -20,6 +20,17 @@
 #                        "viti-{name}-{version}-SHA256SUMS"
 #   cosignIdentityRegex: OIDC identity regex for cosign verify-blob;
 #                        default "^https://github.com/{repo}/.github/workflows/release.yml@refs/tags/"
+#   private:             optional; omit it for a normal, listed plugin.
+#                        true keeps the entry out of `viti plugin list
+#                        --available` unless --all is passed. It controls
+#                        advertising, not access — the plugin still installs
+#                        for anyone who can read its repository. Use it for
+#                        plugins in private repos that most readers of this
+#                        file cannot install anyway.
+#
+# Teams can also keep their own index entirely: list extra index URLs under
+# `pluginindexes` in ~/.vitistack/ctl.config.yaml and viti merges them with
+# this one, with the configured index winning on a name clash.
 #
 # Template placeholders: {name} {repo} {version} {os} {arch}
 
@@ -30,3 +41,11 @@ plugins:
     # viti-gui is built in the same release workflow as viti itself and
     # shares the combined checksums file.
     checksumsAsset: "viti-{version}-SHA256SUMS"
+
+  - name: nhn
+    repo: vitistack/vitictl-nhn
+    description: NHN-internal commands for viti
+    # Private repository: hidden from the default listing because most
+    # readers of this file cannot install it. Requires authentication —
+    # see "Private plugin repositories" in the README.
+    private: true

@@ -28,14 +28,17 @@ can cooperate without reparsing viti's flags:
   VITI_CONFIG            path to the active ctl.config.yaml`,
 }
 
-var listAvailable bool
+var (
+	listAvailable bool
+	listAll       bool
+)
 
 var pluginListCmd = &cobra.Command{
 	Use:     "list",
 	Aliases: []string{"ls"},
 	Short:   "List plugins discovered on PATH",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if listAvailable {
+		if listAvailable || listAll {
 			return listAvailablePlugins(cmd)
 		}
 		return listInstalledPlugins(cmd)
@@ -100,16 +103,39 @@ func listAvailablePlugins(cmd *cobra.Command) error {
 			installed[s.Name] = s
 		}
 	}
+	listable := idx.Listable(listAll)
+	hidden := len(idx.Plugins) - len(listable.Plugins)
+
 	tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "NAME\tREPO\tINSTALLED\tDESCRIPTION")
-	for _, e := range idx.Plugins {
+	header := "NAME\tREPO\tINSTALLED\tDESCRIPTION"
+	if listAll {
+		header = "NAME\tREPO\tINSTALLED\tPRIVATE\tDESCRIPTION"
+	}
+	_, _ = fmt.Fprintln(tw, header)
+	for _, e := range listable.Plugins {
 		ver := "-"
 		if s, ok := installed[e.Name]; ok {
 			ver = s.Version
 		}
+		if listAll {
+			private := "-"
+			if e.Private {
+				private = "yes"
+			}
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", e.Name, e.Repo, ver, private, e.Description)
+			continue
+		}
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", e.Name, e.Repo, ver, e.Description)
 	}
-	return tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	// Say that something was withheld, so a missing plugin is never a mystery.
+	if hidden > 0 {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(),
+			"\n%d plugin(s) not shown (marked private). Use --all to include them.\n", hidden)
+	}
+	return nil
 }
 
 // builtinCommandNames returns the set of subcommand names (and aliases)
@@ -130,6 +156,8 @@ func builtinCommandNames() map[string]bool {
 }
 
 func init() {
+	pluginListCmd.Flags().BoolVar(&listAll, "all", false,
+		"include plugins marked private in the index (implies --available)")
 	pluginListCmd.Flags().BoolVar(&listAvailable, "available", false,
 		"list installable plugins from the curated index instead of installed ones")
 	pluginCmd.AddCommand(pluginListCmd)

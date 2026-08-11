@@ -309,22 +309,55 @@ the plain browser download URL, since private release assets are not reachable
 from the latter. Unauthenticated installs keep using the plain URL, which
 avoids the API's stricter anonymous rate limit.
 
-### Using a private plugin index
+### Extra plugin indexes
 
-`plugins.yaml` in this repository is public. Plugins that should not be
-advertised publicly belong in an index of your own, pointed at by
-`VITICTL_PLUGINS_INDEX`:
+The index in this repository is public. Plugins that should not be advertised
+there can live in an index of your own, listed in `~/.vitistack/ctl.config.yaml`:
 
-```
-export VITICTL_PLUGINS_INDEX=https://raw.githubusercontent.com/<org>/<repo>/main/plugins.yaml
-viti plugin list --available
-viti plugin install <name>
+```yaml
+pluginindexes:
+  - https://raw.githubusercontent.com/<org>/<repo>/main/plugins.yaml
 ```
 
-The file has the same shape as this repository's, and the URL may be any
-location `viti` can reach. Combined with the token discovery above, an internal
-plugin can live entirely in private infrastructure while still installing and
-upgrading through `viti plugin`.
+viti reads the public index first, then each configured one, and merges them.
+`viti plugin list --available` shows everything, and installs work the same
+either way. On a name clash the configured index wins, so a team can override
+a public entry with its own build.
+
+`VITICTL_PLUGINS_INDEX` still replaces the default public index — handy for
+testing an index in isolation. Configured indexes are merged on top of
+whichever default is in effect.
+
+A source that cannot be read is reported and skipped rather than failing the
+command, so one unreachable internal index does not block installing anything
+else. An error is returned only when no index could be read at all.
+
+### Hiding an entry from listings
+
+An entry in a shared index can be marked `private: true`:
+
+```yaml
+  - name: example
+    repo: acme/viti-example
+    description: Team-only helper
+    private: true
+```
+
+It is then left out of `viti plugin list --available`, which reports how many
+entries it withheld, and appears with `viti plugin list --all`:
+
+```
+$ viti plugin list --available
+NAME  REPO               INSTALLED  DESCRIPTION
+gui   vitistack/vitictl  v0.0.22    Terminal UI for viti
+
+1 plugin(s) not shown (marked private). Use --all to include them.
+```
+
+The flag controls **advertising, not access**: the entry is still readable in
+the index file and still installs normally for anyone who can read its
+repository. It is for entries most readers of a shared index could not install
+anyway — combine it with the token discovery above.
 
 ## Make targets
 

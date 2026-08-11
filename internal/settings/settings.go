@@ -15,6 +15,7 @@ const (
 	ConfigFileType = "yaml"
 
 	KeyAvailabilityZones = "availabilityzones"
+	KeyPluginIndexes     = "pluginindexes"
 )
 
 // AvailabilityZone points at a single Kubernetes cluster that is part of a
@@ -69,6 +70,13 @@ func ConfigFilePath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, ConfigFileName+"."+ConfigFileType), nil
+}
+
+// PluginIndexes returns extra plugin index URLs from the config file. They are
+// merged with the built-in public index, so a team can list internal plugins
+// without publishing them to the shared catalog.
+func PluginIndexes() []string {
+	return viper.GetStringSlice(KeyPluginIndexes)
 }
 
 // AvailabilityZones returns all configured availability zones.
