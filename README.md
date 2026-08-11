@@ -240,6 +240,92 @@ by a built-in command. Plugins inherit `VITI_AVAILABILITYZONE` and
 `VITI_CONFIG` in their environment so they can read viti's global state
 without reparsing flags.
 
+### Installing plugins
+
+Plugins listed in the curated index ([`plugins.yaml`](plugins.yaml)) install
+with SHA-256 and, when `cosign` is on `PATH`, Sigstore signature verification:
+
+```
+viti plugin list --available     # what the index offers
+viti plugin install <name>       # or <name>@v1.2.3
+viti plugin upgrade <name>
+viti plugin uninstall <name>
+```
+
+Binaries land next to `viti` itself unless `--prefix` says otherwise.
+
+### Publishing a plugin
+
+A plugin needs a GitHub release whose assets follow the layout the installer
+expects, and an entry in `plugins.yaml`. With the canonical layout the entry is
+just a name, a repo, and a description — no overrides:
+
+| Asset                                       | Purpose                                 |
+| ------------------------------------------- | --------------------------------------- |
+| `viti-<name>-<tag>-<os>-<arch>.tar.gz`      | archive, binary at `<dir>/viti-<name>`  |
+| `viti-<name>-<tag>-SHA256SUMS`              | aggregate checksums                     |
+| `<archive>.cosign.bundle`                   | Sigstore signature                      |
+
+Two details are easy to get wrong:
+
+- The signing workflow must live at `.github/workflows/release.yml`, because
+  the default cosign identity is
+  `^https://github.com/<repo>/.github/workflows/release.yml@refs/tags/`.
+- The installer reads gzipped tars only, and expects the inner binary to be
+  named `viti-<name>` on **every** platform including Windows — it appends
+  `.exe` itself. Ship a `.zip` alongside if you also want a hand-installable
+  Windows artifact.
+
+`plugins.yaml` documents the per-entry overrides for layouts that differ.
+
+### Private plugin repositories
+
+Public plugins need no setup. For a plugin hosted in a **private** repository,
+authenticate first — release lookups and asset downloads then carry your token:
+
+```
+gh auth login          # or: export GH_TOKEN=...
+viti plugin install <name>
+```
+
+The token is discovered in the gh CLI's own order: `GH_TOKEN`, then
+`GITHUB_TOKEN`, then `gh auth token`. Nothing is stored; it is read per
+invocation, and a token that GitHub rejects falls back to an unauthenticated
+request so a stale one cannot break public installs.
+
+This matters because GitHub answers unauthenticated requests for private
+resources with **404, not 403** — so without a token a private repo is
+indistinguishable from one that simply has no releases. `viti` says which case
+it thinks you are in:
+
+```
+github API returned 404 for owner/repo — the repository may be private, or it
+has no releases yet. For a private repository, authenticate first: set
+GH_TOKEN (or GITHUB_TOKEN), or run 'gh auth login'
+```
+
+Authenticated installs fetch assets through the GitHub releases API rather than
+the plain browser download URL, since private release assets are not reachable
+from the latter. Unauthenticated installs keep using the plain URL, which
+avoids the API's stricter anonymous rate limit.
+
+### Using a private plugin index
+
+`plugins.yaml` in this repository is public. Plugins that should not be
+advertised publicly belong in an index of your own, pointed at by
+`VITICTL_PLUGINS_INDEX`:
+
+```
+export VITICTL_PLUGINS_INDEX=https://raw.githubusercontent.com/<org>/<repo>/main/plugins.yaml
+viti plugin list --available
+viti plugin install <name>
+```
+
+The file has the same shape as this repository's, and the URL may be any
+location `viti` can reach. Combined with the token discovery above, an internal
+plugin can live entirely in private infrastructure while still installing and
+upgrading through `viti plugin`.
+
 ## Make targets
 
 `make help` prints the full list. Key targets:

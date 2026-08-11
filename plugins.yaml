@@ -30,10 +30,3 @@ plugins:
     # viti-gui is built in the same release workflow as viti itself and
     # shares the combined checksums file.
     checksumsAsset: "viti-{version}-SHA256SUMS"
-
-  - name: nhn
-    repo: vitistack/vitictl-nhn
-    description: Query NHN's ROR API — resource kinds, listings, and lookups by uid
-    # No overrides: vitictl-nhn's release workflow publishes the canonical
-    # asset layout (viti-nhn-{version}-{os}-{arch}.tar.gz with the binary at
-    # viti-nhn-{version}-{os}-{arch}/viti-nhn, plus viti-nhn-{version}-SHA256SUMS).

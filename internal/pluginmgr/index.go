@@ -73,19 +73,7 @@ func FetchIndex(ctx context.Context) (*Index, error) {
 		ctx, cancel = context.WithTimeout(ctx, fetchTimeout)
 		defer cancel()
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, resolveIndexURL(), nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("index returned %s", resp.Status)
-	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := fetchIndexBody(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -99,6 +87,49 @@ func FetchIndex(ctx context.Context) (*Index, error) {
 		}
 	}
 	return &idx, nil
+}
+
+// fetchIndexBody downloads the index, authenticating when it is hosted on
+// GitHub and a token is available.
+//
+// Any failure of the authenticated attempt is retried anonymously. A stale
+// token makes raw.githubusercontent.com answer 404 rather than 401 for a
+// public file, so a narrower "only retry on 401" rule would still let a
+// leftover token break every plugin command.
+func fetchIndexBody(ctx context.Context) ([]byte, error) {
+	url := resolveIndexURL()
+
+	authorize := shouldAuthenticate(url) && token() != ""
+	body, err := getIndex(ctx, url, authorize)
+	if err == nil {
+		return body, nil
+	}
+	if !authorize {
+		return nil, err
+	}
+	body, retryErr := getIndex(ctx, url, false)
+	if retryErr != nil {
+		// Report the authenticated attempt: it is the more specific failure.
+		return nil, err
+	}
+	_, _ = fmt.Fprintf(warnOut, "==> ⚠️  could not read the plugin index with the configured token (%v); continuing without authentication\n", err)
+	return body, nil
+}
+
+func getIndex(ctx context.Context, url string, authorize bool) ([]byte, error) {
+	req, err := newAPIRequest(ctx, url, "*/*", authorize)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("index returned %s", resp.Status)
+	}
+	return io.ReadAll(resp.Body)
 }
 
 // Find returns the entry with the given name, case-sensitively.

@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -67,7 +66,6 @@ func Install(ctx context.Context, entry *Entry, opts InstallOptions) (*State, er
 	archive := entry.ArchiveName(version, goos, goarch)
 	inner := entry.InnerBinaryPath(version, goos, goarch)
 	sumsName := entry.ChecksumsName(version)
-	base := entry.BaseDownloadURL(version)
 
 	prefix := opts.Prefix
 	if prefix == "" {
@@ -90,14 +88,14 @@ func Install(ctx context.Context, entry *Entry, opts InstallOptions) (*State, er
 	logf(stderr, "installing %s %s for %s/%s", entry.Name, version, goos, goarch)
 	logf(stderr, "downloading %s", archive)
 	archivePath := filepath.Join(tmp, archive)
-	if err := download(ctx, base+"/"+archive, archivePath); err != nil {
+	if err := fetchAsset(ctx, entry, version, archive, archivePath); err != nil {
 		return nil, fmt.Errorf("downloading archive: %w", err)
 	}
 
 	var archiveSHA string
 	if !opts.SkipChecksum {
 		sumsPath := filepath.Join(tmp, sumsName)
-		if err := download(ctx, base+"/"+sumsName, sumsPath); err != nil {
+		if err := fetchAsset(ctx, entry, version, sumsName, sumsPath); err != nil {
 			return nil, fmt.Errorf("downloading checksums: %w", err)
 		}
 		expected, err := checksumFor(sumsPath, archive)
@@ -118,7 +116,7 @@ func Install(ctx context.Context, entry *Entry, opts InstallOptions) (*State, er
 	}
 
 	if !opts.SkipCosign {
-		if err := verifyCosign(ctx, stderr, base, archive, archivePath, entry.CosignIdentity(), tmp); err != nil {
+		if err := verifyCosign(ctx, stderr, entry, version, archive, archivePath, entry.CosignIdentity(), tmp); err != nil {
 			return nil, err
 		}
 	} else {
@@ -164,40 +162,17 @@ func Uninstall(state *State) error {
 	return nil
 }
 
-// resolveLatest pulls the latest release tag for repo directly, without
-// pulling in the release package to avoid an import cycle with cmd
-// (pluginmgr is imported by cmd; keeping it free of that dep makes
-// future refactors easier).
+// resolveLatest pulls the latest release tag for repo. It authenticates when
+// a token is available so private repositories resolve too.
 func resolveLatest(ctx context.Context, repo string) (string, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	rel, err := fetchRelease(ctx, repo, "")
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("github API returned %s for %s", resp.Status, repo)
-	}
-	var out struct {
-		TagName string `json:"tag_name"`
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return "", err
-	}
-	if err := json.Unmarshal(body, &out); err != nil {
-		return "", err
-	}
-	if out.TagName == "" {
+	if rel.TagName == "" {
 		return "", fmt.Errorf("no tag_name in release response for %s", repo)
 	}
-	return out.TagName, nil
+	return rel.TagName, nil
 }
 
 // defaultPrefix installs plugin binaries next to the running viti
@@ -227,23 +202,35 @@ func download(ctx context.Context, url, dst string) error {
 	if err != nil {
 		return err
 	}
+	_, err = downloadRequest(req, dst)
+	return err
+}
+
+// downloadRequest streams an already-built request to dst. Callers that need
+// authentication headers construct the request themselves.
+//
+// Go's http client drops the Authorization header when a redirect crosses to
+// another host, which is exactly what is wanted here: GitHub redirects asset
+// downloads to a pre-signed storage URL that rejects extra credentials.
+func downloadRequest(req *http.Request, dst string) (int, error) {
+	url := req.URL.String()
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GET %s: %s", url, resp.Status)
+		return resp.StatusCode, fmt.Errorf("GET %s: %s", url, resp.Status)
 	}
 	f, err := os.Create(dst) // #nosec G304 -- dst is constructed under a freshly created tmp dir.
 	if err != nil {
-		return err
+		return resp.StatusCode, err
 	}
 	defer func() { _ = f.Close() }()
 	if _, err := io.Copy(f, resp.Body); err != nil {
-		return err
+		return resp.StatusCode, err
 	}
-	return f.Close()
+	return resp.StatusCode, f.Close()
 }
 
 // checksumFor parses a SHA256SUMS file (format: "<hex>  <filename>" or
@@ -292,14 +279,13 @@ func sha256File(path string) (string, error) {
 // verifyCosign shells out to `cosign verify-blob` using the release's
 // .cosign.bundle asset. Matches install.sh's behavior: if cosign is not
 // on PATH, warn and skip (don't fail the install).
-func verifyCosign(ctx context.Context, stderr io.Writer, base, archive, archivePath, identity, tmp string) error {
+func verifyCosign(ctx context.Context, stderr io.Writer, entry *Entry, version, archive, archivePath, identity, tmp string) error {
 	if _, err := exec.LookPath("cosign"); err != nil {
 		logf(stderr, "⚠️  cosign not found on PATH — skipping signature verification")
 		return nil
 	}
-	bundleURL := base + "/" + archive + ".cosign.bundle"
 	bundle := filepath.Join(tmp, archive+".cosign.bundle")
-	if err := download(ctx, bundleURL, bundle); err != nil {
+	if err := fetchAsset(ctx, entry, version, archive+".cosign.bundle", bundle); err != nil {
 		logf(stderr, "⚠️  cosign bundle not available (%v) — skipping signature verification", err)
 		return nil
 	}
