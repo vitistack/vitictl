@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/vitistack/vitictl/internal/release"
 )
@@ -76,19 +77,21 @@ installed) verifies the Sigstore signature before replacing the binary.`,
 }
 
 // confirm prompts the user for a yes/no answer on the command's stdin.
-// Non-interactive stdin is treated as "no" so piped invocations do not
-// silently proceed with an upgrade.
+// Non-interactive stdin is refused outright rather than read, so a piped or
+// redirected invocation can never proceed with an upgrade unprompted.
 func confirm(cmd *cobra.Command, prompt string) (bool, error) {
-	in, ok := cmd.InOrStdin().(*os.File)
-	if ok {
-		if fi, err := in.Stat(); err == nil && (fi.Mode()&os.ModeCharDevice) == 0 {
-			return false, fmt.Errorf("stdin is not a terminal; re-run with --yes to confirm non-interactively")
-		}
+	// Ask the terminal directly rather than inferring from the file mode:
+	// /dev/null is a character device but is nobody's terminal, so a
+	// mode-based check waves `upgrade --run < /dev/null` through and then
+	// fails on the read below with a bare "EOF".
+	if in, ok := cmd.InOrStdin().(*os.File); ok && !term.IsTerminal(int(in.Fd())) {
+		return false, fmt.Errorf("stdin is not a terminal; re-run with --yes to confirm non-interactively")
 	}
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s [y/N]: ", prompt)
-	reader := bufio.NewReader(cmd.InOrStdin())
-	line, err := reader.ReadString('\n')
-	if err != nil {
+
+	// A final answer without a trailing newline still counts.
+	line, err := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+	if err != nil && line == "" {
 		return false, err
 	}
 	answer := strings.ToLower(strings.TrimSpace(line))
