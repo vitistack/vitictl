@@ -56,7 +56,7 @@ func Install(ctx context.Context, entry *Entry, opts InstallOptions) (*State, er
 	if version == "" {
 		logf(stderr, "resolving latest release for %s", entry.Repo)
 		var err error
-		version, err = resolveLatest(ctx, entry.Repo)
+		version, err = LatestVersion(ctx, entry.Repo)
 		if err != nil {
 			return nil, err
 		}
@@ -162,9 +162,9 @@ func Uninstall(state *State) error {
 	return nil
 }
 
-// resolveLatest pulls the latest release tag for repo. It authenticates when
+// LatestVersion pulls the latest release tag for repo. It authenticates when
 // a token is available so private repositories resolve too.
-func resolveLatest(ctx context.Context, repo string) (string, error) {
+func LatestVersion(ctx context.Context, repo string) (string, error) {
 	rel, err := fetchRelease(ctx, repo, "")
 	if err != nil {
 		return "", err

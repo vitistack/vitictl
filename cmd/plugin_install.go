@@ -152,21 +152,26 @@ func upgradeOne(ctx context.Context, stdout, stderr io.Writer, idx *pluginmgr.In
 		// repo recorded in state by synthesising a minimal entry.
 		entry = &pluginmgr.Entry{Name: state.Name, Repo: state.Repo}
 	}
-	latest, err := release.FetchLatest(ctx, entry.Repo)
+	// Deliberately not release.FetchLatest: that talks to GitHub anonymously,
+	// which is fine for vitictl's own public repo but returns 404 for a
+	// private plugin repo — indistinguishable from "no releases". pluginmgr
+	// owns the credentials, so the check has to go through it, exactly like
+	// the install below does.
+	latestTag, err := pluginmgr.LatestVersion(ctx, entry.Repo)
 	if err != nil {
 		return fmt.Errorf("checking %s: %w", entry.Repo, err)
 	}
-	switch release.Compare(state.Version, latest.Tag) {
+	switch release.Compare(state.Version, latestTag) {
 	case release.StatusUpToDate:
 		_, _ = fmt.Fprintf(stdout, "✅ %s %s — already up to date\n", state.Name, state.Version)
 		return nil
 	case release.StatusAhead:
-		_, _ = fmt.Fprintf(stdout, "🧪 %s %s is ahead of latest (%s) — skipping\n", state.Name, state.Version, latest.Tag)
+		_, _ = fmt.Fprintf(stdout, "🧪 %s %s is ahead of latest (%s) — skipping\n", state.Name, state.Version, latestTag)
 		return nil
 	}
-	_, _ = fmt.Fprintf(stdout, "⬆️  %s: %s -> %s\n", state.Name, state.Version, latest.Tag)
+	_, _ = fmt.Fprintf(stdout, "⬆️  %s: %s -> %s\n", state.Name, state.Version, latestTag)
 	newState, err := pluginmgr.Install(ctx, entry, pluginmgr.InstallOptions{
-		Version: latest.Tag,
+		Version: latestTag,
 		Prefix:  dirOf(state.BinaryPath),
 		Stderr:  stderr,
 	})

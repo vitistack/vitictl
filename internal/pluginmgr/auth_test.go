@@ -143,12 +143,12 @@ func TestResolveLatestSendsBearerTokenWhenAvailable(t *testing.T) {
 	fake, url := newFakeAPI(t, "v1.2.3", nil)
 	withAPIBase(t, url)
 
-	got, err := resolveLatest(context.Background(), "o/r")
+	got, err := LatestVersion(context.Background(), "o/r")
 	if err != nil {
-		t.Fatalf("resolveLatest() error = %v", err)
+		t.Fatalf("LatestVersion() error = %v", err)
 	}
 	if got != "v1.2.3" {
-		t.Errorf("resolveLatest() = %q, want v1.2.3", got)
+		t.Errorf("LatestVersion() = %q, want v1.2.3", got)
 	}
 	if len(fake.authHeaders) == 0 {
 		t.Fatal("no requests reached the API")
@@ -164,8 +164,8 @@ func TestResolveLatestSendsNoAuthHeaderWithoutToken(t *testing.T) {
 	fake, url := newFakeAPI(t, "v1.0.0", nil)
 	withAPIBase(t, url)
 
-	if _, err := resolveLatest(context.Background(), "o/r"); err != nil {
-		t.Fatalf("resolveLatest() error = %v", err)
+	if _, err := LatestVersion(context.Background(), "o/r"); err != nil {
+		t.Fatalf("LatestVersion() error = %v", err)
 	}
 	if fake.authHeaders[0] != "" {
 		t.Errorf("Authorization = %q, want no header when unauthenticated", fake.authHeaders[0])
@@ -181,9 +181,9 @@ func TestResolveLatest404WithoutTokenExplainsPrivateRepos(t *testing.T) {
 	fake.releaseStatus = http.StatusNotFound
 	withAPIBase(t, url)
 
-	_, err := resolveLatest(context.Background(), "o/r")
+	_, err := LatestVersion(context.Background(), "o/r")
 	if err == nil {
-		t.Fatal("resolveLatest() = nil error on 404, want one")
+		t.Fatal("LatestVersion() = nil error on 404, want one")
 	}
 	for _, want := range []string{"private", "GH_TOKEN", "gh auth login"} {
 		if !strings.Contains(err.Error(), want) {
@@ -200,9 +200,9 @@ func TestResolveLatest404WithTokenDoesNotBlameAuth(t *testing.T) {
 	fake.releaseStatus = http.StatusNotFound
 	withAPIBase(t, url)
 
-	_, err := resolveLatest(context.Background(), "o/r")
+	_, err := LatestVersion(context.Background(), "o/r")
 	if err == nil {
-		t.Fatal("resolveLatest() = nil error on 404, want one")
+		t.Fatal("LatestVersion() = nil error on 404, want one")
 	}
 	if strings.Contains(err.Error(), "GH_TOKEN") {
 		t.Errorf("error %q should not suggest setting a token when one is already set", err)
@@ -324,12 +324,12 @@ func TestRejectedTokenFallsBackToAnonymousForPublicRepos(t *testing.T) {
 	warnOut = &warnings
 	t.Cleanup(func() { warnOut = oldWarn })
 
-	got, err := resolveLatest(context.Background(), "o/r")
+	got, err := LatestVersion(context.Background(), "o/r")
 	if err != nil {
-		t.Fatalf("resolveLatest() error = %v, want an anonymous retry to succeed", err)
+		t.Fatalf("LatestVersion() error = %v, want an anonymous retry to succeed", err)
 	}
 	if got != "v2.0.0" {
-		t.Errorf("resolveLatest() = %q, want v2.0.0", got)
+		t.Errorf("LatestVersion() = %q, want v2.0.0", got)
 	}
 	if !sawAuthed || !sawAnon {
 		t.Errorf("expected an authenticated attempt then an anonymous retry (authed=%v anon=%v)", sawAuthed, sawAnon)
@@ -360,9 +360,9 @@ func TestRejectedTokenOnPrivateRepoReportsTheAuthError(t *testing.T) {
 	warnOut = &warnings
 	t.Cleanup(func() { warnOut = oldWarn })
 
-	_, err := resolveLatest(context.Background(), "o/r")
+	_, err := LatestVersion(context.Background(), "o/r")
 	if err == nil {
-		t.Fatal("resolveLatest() = nil error, want the token rejection reported")
+		t.Fatal("LatestVersion() = nil error, want the token rejection reported")
 	}
 	if !strings.Contains(err.Error(), "rejected") {
 		t.Errorf("error %q should report the token rejection, not the anonymous 404", err)
