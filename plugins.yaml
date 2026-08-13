@@ -42,6 +42,10 @@ plugins:
     # shares the combined checksums file.
     checksumsAsset: "viti-{version}-SHA256SUMS"
 
+  - name: kubevirt
+    repo: vitistack/vitictl-kubevirt
+    description: List and control KubeVirt virtual machines
+
   - name: nhn
     repo: vitistack/vitictl-nhn
     description: NHN-internal commands for viti
