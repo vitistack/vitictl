@@ -21,10 +21,14 @@ const stateDirName = "plugins"
 // State records everything vitictl needs to upgrade or uninstall a
 // plugin without re-reading the index.
 type State struct {
-	Name        string    `json:"name"`
-	Repo        string    `json:"repo"`
-	Version     string    `json:"version"`
-	BinaryPath  string    `json:"binaryPath"`
+	Name       string `json:"name"`
+	Repo       string `json:"repo"`
+	Version    string `json:"version"`
+	BinaryPath string `json:"binaryPath"`
+	// Aliases are the extra names installed beside the binary. Recorded so
+	// uninstall removes exactly what install created, and so `plugin list` can
+	// show an alias as part of its plugin rather than as a second install.
+	Aliases     []string  `json:"aliases,omitempty"`
 	SHA256      string    `json:"sha256,omitempty"`
 	InstalledAt time.Time `json:"installedAt"`
 }

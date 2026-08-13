@@ -64,8 +64,18 @@ type Entry struct {
 	// installs normally for anyone who can read its repository.
 	Private bool `json:"private,omitempty" yaml:"private,omitempty"`
 
-	Name                string `json:"name"                          yaml:"name"`
-	Repo                string `json:"repo"                          yaml:"repo"`
+	Name string `json:"name"                          yaml:"name"`
+	Repo string `json:"repo"                          yaml:"repo"`
+
+	// Aliases are extra subcommand names the plugin answers to, installed as
+	// links beside the binary: "kv" makes `viti kv` reach viti-kubevirt.
+	//
+	// They are declared in the index rather than chosen at install time so a
+	// clash is reviewed once, centrally, in the pull request that adds them —
+	// viti's own commands always win, and a colliding alias would simply never
+	// fire, silently, on every machine that installed it.
+	Aliases []string `json:"aliases,omitempty" yaml:"aliases,omitempty"`
+
 	Description         string `json:"description,omitempty"         yaml:"description,omitempty"`
 	ArchiveAsset        string `json:"archiveAsset,omitempty"        yaml:"archiveAsset,omitempty"`
 	ArchiveInnerPath    string `json:"archiveInnerPath,omitempty"    yaml:"archiveInnerPath,omitempty"`
@@ -218,6 +228,11 @@ func (i *Index) Find(name string) (*Entry, bool) {
 	return nil, false
 }
 
+// Validate reports whether an entry is usable. Exported so the repository's
+// own plugins.yaml can be checked in CI with exactly the rules the installer
+// applies at fetch time, rather than a second copy of them that can drift.
+func (e *Entry) Validate() error { return e.validate() }
+
 func (e *Entry) validate() error {
 	if e.Name == "" {
 		return errors.New("plugin entry missing name")
@@ -227,6 +242,24 @@ func (e *Entry) validate() error {
 	}
 	if !strings.Contains(e.Repo, "/") {
 		return fmt.Errorf("plugin %q: repo %q must be owner/name", e.Name, e.Repo)
+	}
+	seen := make(map[string]struct{}, len(e.Aliases))
+	for _, a := range e.Aliases {
+		switch {
+		case a == "":
+			return fmt.Errorf("plugin %q: empty alias", e.Name)
+		case a == e.Name:
+			return fmt.Errorf("plugin %q: alias repeats the plugin name", e.Name)
+		// An alias becomes a filename (viti-<alias>) and a shell word, so
+		// anything a path or a shell would reinterpret is refused here rather
+		// than producing a confusing file on someone's PATH.
+		case strings.ContainsAny(a, ` /\:.`):
+			return fmt.Errorf("plugin %q: alias %q may not contain spaces, dots, or path separators", e.Name, a)
+		}
+		if _, dup := seen[a]; dup {
+			return fmt.Errorf("plugin %q: alias %q listed twice", e.Name, a)
+		}
+		seen[a] = struct{}{}
 	}
 	return nil
 }

@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 
+	"github.com/vitistack/vitictl/internal/plugin"
 	"github.com/vitistack/vitictl/internal/pluginmgr"
 	"github.com/vitistack/vitictl/internal/release"
 )
@@ -16,7 +18,111 @@ var (
 	installPrefix       string
 	installSkipChecksum bool
 	installSkipCosign   bool
+	installNoAliases    bool
 )
+
+// aliasConflicts reports which of an entry's aliases are already claimed, by
+// viti's own commands or by another plugin already on PATH.
+//
+// The plugin's own name is excluded from the "other plugins" set so that
+// reinstalling or upgrading never conflicts with the copy being replaced.
+func aliasConflicts(entry *pluginmgr.Entry) []pluginmgr.Conflict {
+	// The binary this plugin already occupies, if any. Anything resolving to
+	// it is this plugin under another name, not a competitor.
+	var ownBinary string
+	var ownAliases []string
+	if state, err := pluginmgr.ReadState(entry.Name); err == nil && state != nil {
+		ownBinary = state.BinaryPath
+		ownAliases = state.Aliases
+	}
+
+	others := map[string]string{}
+	if found, err := plugin.List(); err == nil {
+		for _, p := range found {
+			if p.Name == entry.Name {
+				continue
+			}
+			if _, dup := others[p.Name]; dup {
+				continue // first on PATH wins, matching dispatch
+			}
+			others[p.Name] = p.Path
+		}
+	}
+
+	// An alias this plugin already answers to is the link about to be
+	// rewritten, not a conflict. That covers both the links viti recorded and
+	// one made by hand before the index declared it — which is exactly the
+	// state every early adopter of a shortcut is in.
+	for _, a := range ownAliases {
+		delete(others, a)
+	}
+	if ownBinary != "" {
+		for name, path := range others {
+			if sameFile(path, ownBinary) {
+				delete(others, name)
+			}
+		}
+	}
+	return pluginmgr.CheckAliases(entry, builtinCommandNames(), others)
+}
+
+// reconcileAliases brings an installed plugin's alias links in line with the
+// index, without reinstalling the binary.
+//
+// Failures here are reported and swallowed: the plugin itself is installed and
+// working under its real name, and a missing shortcut is not worth failing an
+// upgrade over.
+func reconcileAliases(stdout, stderr io.Writer, entry *pluginmgr.Entry, state *pluginmgr.State) {
+	if len(entry.Aliases) == 0 && len(state.Aliases) == 0 {
+		return
+	}
+	if conflicts := aliasConflicts(entry); len(conflicts) > 0 {
+		_, _ = fmt.Fprintf(stderr, "⚠️  %v\n", pluginmgr.JoinConflicts(entry.Name, conflicts))
+		return
+	}
+	have, err := pluginmgr.EnsureAliases(state, entry.Aliases, stderr)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "⚠️  reconciling aliases for %s: %v\n", entry.Name, err)
+		return
+	}
+	if equalStrings(have, state.Aliases) {
+		return
+	}
+	state.Aliases = have
+	if err := pluginmgr.WriteState(state); err != nil {
+		_, _ = fmt.Fprintf(stderr, "⚠️  saving plugin state: %v\n", err)
+		return
+	}
+	for _, a := range have {
+		_, _ = fmt.Fprintf(stdout, "   also reachable as `viti %s`\n", a)
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// sameFile reports whether two paths reach the same file once symlinks are
+// resolved.
+func sameFile(a, b string) bool {
+	ra, err := filepath.EvalSymlinks(a)
+	if err != nil {
+		return false
+	}
+	rb, err := filepath.EvalSymlinks(b)
+	if err != nil {
+		return false
+	}
+	return ra == rb
+}
 
 var pluginInstallCmd = &cobra.Command{
 	Use:   "install <name>[@<version>]",
@@ -36,11 +142,20 @@ installs the binary next to viti itself (or into --prefix).`,
 		if !ok {
 			return fmt.Errorf("plugin %q is not in the curated index (see `viti plugin list --available`)", name)
 		}
+		// Refused before anything is downloaded: a taken alias is a decision
+		// for whoever curates the index, and finding out after the install
+		// would leave a half-configured plugin behind.
+		if !installNoAliases {
+			if err := pluginmgr.JoinConflicts(entry.Name, aliasConflicts(entry)); err != nil {
+				return err
+			}
+		}
 		state, err := pluginmgr.Install(cmd.Context(), entry, pluginmgr.InstallOptions{
 			Version:      version,
 			Prefix:       installPrefix,
 			SkipChecksum: installSkipChecksum,
 			SkipCosign:   installSkipCosign,
+			SkipAliases:  installNoAliases,
 			Stderr:       cmd.ErrOrStderr(),
 		})
 		if err != nil {
@@ -51,6 +166,9 @@ installs the binary next to viti itself (or into --prefix).`,
 		}
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(),
 			"✅ %s %s installed — try `viti %s --help`\n", state.Name, state.Version, state.Name)
+		for _, a := range state.Aliases {
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "   also reachable as `viti %s`\n", a)
+		}
 		return nil
 	},
 }
@@ -163,20 +281,41 @@ func upgradeOne(ctx context.Context, stdout, stderr io.Writer, idx *pluginmgr.In
 	}
 	switch release.Compare(state.Version, latestTag) {
 	case release.StatusUpToDate:
+		// Aliases are reconciled even here. A plugin already on the latest
+		// release never reinstalls, so without this an alias added to the
+		// index would reach new installs only and never anyone already
+		// current — which is most people.
+		reconcileAliases(stdout, stderr, entry, state)
 		_, _ = fmt.Fprintf(stdout, "✅ %s %s — already up to date\n", state.Name, state.Version)
 		return nil
 	case release.StatusAhead:
+		reconcileAliases(stdout, stderr, entry, state)
 		_, _ = fmt.Fprintf(stdout, "🧪 %s %s is ahead of latest (%s) — skipping\n", state.Name, state.Version, latestTag)
 		return nil
 	}
 	_, _ = fmt.Fprintf(stdout, "⬆️  %s: %s -> %s\n", state.Name, state.Version, latestTag)
+
+	// A viti upgrade can add a command that claims an alias installed months
+	// ago, so the check runs here too. Unlike install this only warns: the
+	// upgrade is wanted regardless, and refusing it over a cosmetic shortcut
+	// would strand the plugin on an old version.
+	conflicts := aliasConflicts(entry)
+	if len(conflicts) > 0 {
+		_, _ = fmt.Fprintf(stderr, "⚠️  %v\n", pluginmgr.JoinConflicts(entry.Name, conflicts))
+	}
 	newState, err := pluginmgr.Install(ctx, entry, pluginmgr.InstallOptions{
-		Version: latestTag,
-		Prefix:  dirOf(state.BinaryPath),
-		Stderr:  stderr,
+		Version:     latestTag,
+		Prefix:      dirOf(state.BinaryPath),
+		SkipAliases: len(conflicts) > 0,
+		Stderr:      stderr,
 	})
 	if err != nil {
 		return err
+	}
+	// Aliases dropped this round are still ours to clean up; carrying the old
+	// list forward would leave state claiming links that no longer exist.
+	if len(conflicts) > 0 {
+		newState.Aliases = state.Aliases
 	}
 	return pluginmgr.WriteState(newState)
 }
@@ -209,6 +348,8 @@ func init() {
 		"skip SHA-256 verification (not recommended)")
 	pluginInstallCmd.Flags().BoolVar(&installSkipCosign, "skip-cosign", false,
 		"skip Sigstore signature verification")
+	pluginInstallCmd.Flags().BoolVar(&installNoAliases, "no-aliases", false,
+		"install only viti-<name>, skipping the short aliases the index declares")
 
 	pluginCmd.AddCommand(pluginInstallCmd)
 	pluginCmd.AddCommand(pluginUpgradeCmd)

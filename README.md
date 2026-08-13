@@ -254,6 +254,45 @@ viti plugin uninstall <name>
 
 Binaries land next to `viti` itself unless `--prefix` says otherwise.
 
+### Plugin aliases
+
+An index entry may declare short aliases, installed as links beside the binary:
+
+```yaml
+- name: kubevirt
+  repo: vitistack/vitictl-kubevirt
+  aliases: [kv]        # `viti kv` reaches viti-kubevirt
+```
+
+Aliases are declared in the index rather than chosen at install time because a
+clash is **silent**. viti only looks for a plugin when it does not recognise a
+subcommand, so an alias colliding with a built-in never fires and never says
+why — `viti kc` would keep meaning `kubernetescluster` on every machine that
+installed it. Declaring them centrally means the clash is caught once, in
+review, by the tests over `plugins.yaml`.
+
+Three guards back that up:
+
+- `viti plugin install` refuses an alias already claimed by a built-in command
+  or by another installed plugin, before downloading anything. `--no-aliases`
+  installs the plugin without them.
+- `viti plugin list` re-checks on every run, because a viti release can claim a
+  name months after an alias was installed — the one case install-time checking
+  cannot catch. Aliases appear on their plugin's row, not as extra installs:
+
+  ```
+  NAME            VERSION  PATH                        STATUS
+  kubevirt (kv)   v0.0.1   /Users/me/.local/bin/viti-kubevirt  ok
+  ```
+
+- `viti plugin uninstall` removes the links it created, and only those: a
+  symlink is removed when it points at the plugin's binary, a plain file only
+  when it is byte-identical. Somebody else's `viti-kv` is left alone.
+
+Before adding an alias, check it against `viti --help` including each command's
+own aliases. Prefer aliases that shorten a genuinely long name — a two-letter
+alias for a three-letter plugin spends the shared namespace for almost nothing.
+
 ### Publishing a plugin
 
 A plugin needs a GitHub release whose assets follow the layout the installer

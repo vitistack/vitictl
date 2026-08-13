@@ -32,6 +32,11 @@ type InstallOptions struct {
 	// SkipCosign disables Sigstore signature verification. The installer
 	// also silently skips cosign if the cosign binary is not on PATH.
 	SkipCosign bool
+	// SkipAliases installs the binary without the entry's alias links. The
+	// escape hatch for a plugin whose alias has been claimed by something
+	// else: the plugin is still worth having, the alias is not worth fighting
+	// over.
+	SkipAliases bool
 	// Stdout/Stderr receive human-readable progress messages. Nil writes
 	// to os.Stderr (progress) / are suppressed (stdout).
 	Stdout io.Writer
@@ -140,21 +145,48 @@ func Install(ctx context.Context, entry *Entry, opts InstallOptions) (*State, er
 	}
 	logf(stderr, "installed %s", dst)
 
+	// Aliases are links beside the binary, so viti's ordinary PATH discovery
+	// finds them with no further knowledge. A link that cannot be created is
+	// reported and skipped rather than failing the install: the plugin is
+	// already on disk and working under its real name.
+	var linked []string
+	if !opts.SkipAliases {
+		for _, alias := range entry.Aliases {
+			if err := linkAlias(prefix, dstName, alias); err != nil {
+				logf(stderr, "⚠️  could not install alias %q: %v", alias, err)
+				continue
+			}
+			linked = append(linked, alias)
+			logf(stderr, "aliased %s -> %s", AliasBinaryName(alias), dstName)
+		}
+	}
+
 	return &State{
 		Name:        entry.Name,
 		Repo:        entry.Repo,
 		Version:     version,
 		BinaryPath:  dst,
+		Aliases:     linked,
 		SHA256:      archiveSHA,
 		InstalledAt: time.Now().UTC(),
 	}, nil
 }
 
-// Uninstall removes the installed binary for state and returns.
-// Callers are responsible for removing the state file separately.
+// Uninstall removes the installed binary for state, and any alias links it
+// created. Callers are responsible for removing the state file separately.
+//
+// Aliases go first: once the binary is gone a symlink cannot be verified as
+// pointing at it, and unlinkAlias would leave the dangling link behind rather
+// than risk deleting a stranger's file.
 func Uninstall(state *State) error {
 	if state == nil || state.BinaryPath == "" {
 		return errors.New("nil state or missing binary path")
+	}
+	prefix, binaryName := filepath.Split(state.BinaryPath)
+	for _, alias := range state.Aliases {
+		if err := unlinkAlias(filepath.Clean(prefix), binaryName, alias); err != nil {
+			return fmt.Errorf("removing alias %q: %w", alias, err)
+		}
 	}
 	if err := os.Remove(state.BinaryPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("removing %s: %w", state.BinaryPath, err)

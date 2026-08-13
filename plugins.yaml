@@ -9,6 +9,22 @@
 #   name:         short name used on the command line (e.g. "gui" -> viti-gui)
 #   repo:         <owner>/<repo> hosting the plugin's GitHub releases
 #   description:  one-line summary shown by `viti plugin list --available`
+#   aliases:      optional extra subcommand names, installed as links beside
+#                 the binary (e.g. "kv" makes `viti kv` reach viti-kubevirt).
+#
+# Aliases live here rather than being chosen at install time because a clash
+# is silent: viti only looks for a plugin when it does not recognise the
+# subcommand, so an alias that collides with a built-in never fires and never
+# says why. Declaring them centrally means a clash is caught in review, once,
+# instead of on every machine that installed the plugin. `viti plugin install`
+# refuses a colliding alias, and `viti plugin list` re-checks — a viti release
+# can claim a name months after the alias was installed.
+#
+# Before adding one, check it against `viti --help`, including each command's
+# aliases. Currently taken: c, cls, cpvip, eb, kc, kp, kvc, lb, m, mc, mp, nc,
+# nn, pxc, vs, plus every full command name. Prefer aliases that shorten a
+# genuinely long name; a two-letter alias for a three-letter plugin buys
+# little and spends the namespace.
 #
 # Optional overrides (defaults cover the canonical "viti-<name> in its own
 # repo" layout):
@@ -38,6 +54,7 @@ plugins:
   - name: gui
     repo: vitistack/vitictl
     description: Terminal UI for viti
+    aliases: [g]
     # viti-gui is built in the same release workflow as viti itself and
     # shares the combined checksums file.
     checksumsAsset: "viti-{version}-SHA256SUMS"
@@ -45,10 +62,14 @@ plugins:
   - name: kubevirt
     repo: vitistack/vitictl-kubevirt
     description: List and control KubeVirt virtual machines
+    aliases: [kv]
 
   - name: nhn
     repo: vitistack/vitictl-nhn
     description: NHN-internal commands for viti
+    # No alias: "n" is free today but reads as "network" next to the existing
+    # nc and nn, and is the likeliest single letter a future built-in claims.
+    # Three letters is already short enough to leave the namespace alone.
     # Private repository: hidden from the default listing because most
     # readers of this file cannot install it. Requires authentication —
     # see "Private plugin repositories" in the README.

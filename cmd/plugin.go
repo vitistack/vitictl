@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 
@@ -65,11 +66,17 @@ func listInstalledPlugins(cmd *cobra.Command) error {
 	}
 
 	builtins := builtinCommandNames()
+	aliasOf := aliasOwners(found, managed)
 	seen := make(map[string]string)
 
 	tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "NAME\tVERSION\tPATH\tSTATUS")
 	for _, p := range found {
+		// An alias is the same install reached by another name, not a second
+		// plugin; it is reported on its owner's row instead of claiming one.
+		if _, isAlias := aliasOf[p.Name]; isAlias {
+			continue
+		}
 		var notes []string
 		if prior, dup := seen[p.Name]; dup {
 			notes = append(notes, fmt.Sprintf("shadowed by %s", prior))
@@ -79,6 +86,21 @@ func listInstalledPlugins(cmd *cobra.Command) error {
 		if builtins[p.Name] {
 			notes = append(notes, "shadowed by built-in command")
 		}
+
+		name := p.Name
+		if s, ok := managed[p.Name]; ok && len(s.Aliases) > 0 {
+			name = fmt.Sprintf("%s (%s)", p.Name, strings.Join(s.Aliases, ", "))
+			// viti can grow a command after an alias was installed, which is
+			// exactly when a working shortcut goes quietly dead. Re-checking
+			// on every listing is the only place that gets caught.
+			for _, a := range s.Aliases {
+				if builtins[a] {
+					notes = append(notes,
+						fmt.Sprintf("alias %q shadowed by built-in command", a))
+				}
+			}
+		}
+
 		status := "ok"
 		if len(notes) > 0 {
 			status = strings.Join(notes, "; ")
@@ -87,9 +109,40 @@ func listInstalledPlugins(cmd *cobra.Command) error {
 		if s, ok := managed[p.Name]; ok {
 			version = s.Version
 		}
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", p.Name, version, p.Path, status)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", name, version, p.Path, status)
 	}
 	return tw.Flush()
+}
+
+// aliasOwners maps an alias name to the plugin that owns it.
+//
+// Recorded state is authoritative, but a link made by hand — or by an older
+// viti that did not track aliases — is still an alias in every way that
+// matters, so binaries resolving to the same file are folded in too.
+func aliasOwners(found []plugin.Plugin, managed map[string]*pluginmgr.State) map[string]string {
+	out := map[string]string{}
+	for name, s := range managed {
+		for _, a := range s.Aliases {
+			out[a] = name
+		}
+	}
+
+	real := make(map[string]string, len(found))
+	for _, p := range found {
+		resolved, err := filepath.EvalSymlinks(p.Path)
+		if err != nil {
+			continue
+		}
+		if owner, ok := real[resolved]; ok {
+			// Same file under two names: the first discovered keeps the row.
+			if _, known := out[p.Name]; !known && p.Name != owner {
+				out[p.Name] = owner
+			}
+			continue
+		}
+		real[resolved] = p.Name
+	}
+	return out
 }
 
 func listAvailablePlugins(cmd *cobra.Command) error {
