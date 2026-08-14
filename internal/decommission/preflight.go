@@ -94,6 +94,8 @@ func (r *Runner) preflightROR(ctx context.Context, pass, fail, note func(string,
 	}
 	vctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
+	// #nosec G204 -- same trust model as internal/plugin dispatch: bin is the
+	// user-installed viti-nhn plugin from PATH or the operator's VITI_NHN_BIN.
 	out, err := exec.CommandContext(vctx, bin, "version").CombinedOutput()
 	if err != nil {
 		fail("viti-nhn plugin present but not runnable: %v", err)

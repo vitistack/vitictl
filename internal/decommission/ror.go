@@ -132,6 +132,9 @@ func (p *rorPurge) exec(ctx context.Context, bin string, force bool) {
 	if force {
 		args = append(args, "--force")
 	}
+	// #nosec G204 -- launching the user-installed viti-nhn plugin binary,
+	// resolved via PATH or the operator's own VITI_NHN_BIN; args are
+	// program-constructed (same trust model as internal/plugin dispatch).
 	cmd := exec.CommandContext(ctx, bin, args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
