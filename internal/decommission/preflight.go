@@ -2,9 +2,8 @@ package decommission
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -63,8 +62,9 @@ func (r *Runner) Preflight(ctx context.Context) error {
 }
 
 // preflightROR checks the ROR half without purging anything: identity secret
-// present, local token valid, and the registry entry consistent with the
-// secret. 404 (already purged) passes — the real run treats it as done.
+// present and the viti-nhn plugin available to delegate the purge to. The
+// registry-side consistency check lives in the plugin itself (its purge
+// verifies clusterid → uid before deleting).
 func (r *Runner) preflightROR(ctx context.Context, pass, fail, note func(string, ...any)) {
 	var ns corev1.Namespace
 	if err := r.guest.Get(ctx, ctrlclient.ObjectKey{Name: "nhn-ror"}, &ns); err != nil {
@@ -81,37 +81,25 @@ func (r *Runner) preflightROR(ctx context.Context, pass, fail, note func(string,
 		return
 	}
 	clusterID := string(secret.Data["CLUSTER_ID"])
-	uid := string(secret.Data["CLUSTER_UID"])
-	if uid == "" {
-		fail("secret nhn-ror/ror-apikey has no CLUSTER_UID")
+	if clusterID == "" {
+		fail("secret nhn-ror/ror-apikey has no CLUSTER_ID")
 		return
 	}
-	pass("ROR identity: clusterid=%s uid=%s", clusterID, uid)
+	pass("ROR identity: clusterid=%s", clusterID)
 
-	if _, err := r.rorToken(); err != nil {
-		fail("ROR token: %v", err)
+	bin, err := nhnBinary()
+	if err != nil {
+		fail("viti-nhn plugin not found — ROR deregistration would be skipped (viti plugin install nhn)")
 		return
 	}
-	code, body, err := r.rorRequest(ctx, http.MethodGet, "/v1/clusters/"+clusterID)
-	switch {
-	case err != nil:
-		fail("ROR API unreachable: %v", err)
-	case code == http.StatusOK:
-		var got struct {
-			UID string `json:"uid"`
-		}
-		if jerr := json.Unmarshal(body, &got); jerr != nil || got.UID == "" {
-			fail("ROR returned 200 for %s but no uid", clusterID)
-		} else if got.UID != uid {
-			fail("ROR uid mismatch: registry has %s, secret says %s", got.UID, uid)
-		} else {
-			pass("ROR registry entry verified (uid matches secret)")
-		}
-	case code == http.StatusNotFound:
-		note("cluster not found in ROR — already purged, real run will treat as done")
-	case code == http.StatusUnauthorized:
-		fail("ROR token expired/invalid — run 'ror login' first")
-	default:
-		fail("ROR verify GET returned HTTP %d: %s", code, strings.TrimSpace(string(body)))
+	vctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	// #nosec G204 -- same trust model as internal/plugin dispatch: bin is the
+	// user-installed viti-nhn plugin from PATH or the operator's VITI_NHN_BIN.
+	out, err := exec.CommandContext(vctx, bin, "version").CombinedOutput()
+	if err != nil {
+		fail("viti-nhn plugin present but not runnable: %v", err)
+		return
 	}
+	pass("ROR purge delegated to %s (%s)", bin, strings.TrimSpace(string(out)))
 }

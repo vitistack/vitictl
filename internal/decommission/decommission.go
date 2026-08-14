@@ -38,12 +38,6 @@ type Options struct {
 	// Out receives human-readable progress output.
 	Out io.Writer
 
-	// RORAPIURL is the ROR API base URL. Empty = https://api.ror.nhn.no.
-	RORAPIURL string
-	// RORConfigPath is the ror CLI config holding the access token.
-	// Empty = ~/.ror/config.yaml.
-	RORConfigPath string
-
 	// SkipPreclean skips phase 1 entirely (guest unreachable / already
 	// precleaned). External state held by the guest will NOT be cleaned.
 	SkipPreclean bool
@@ -57,9 +51,6 @@ func (o *Options) withDefaults() Options {
 	out := *o
 	if out.Out == nil {
 		out.Out = io.Discard
-	}
-	if out.RORAPIURL == "" {
-		out.RORAPIURL = "https://api.ror.nhn.no"
 	}
 	if out.MachineTimeout == 0 {
 		out.MachineTimeout = 15 * time.Minute
