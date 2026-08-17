@@ -36,13 +36,22 @@ type Evidence struct {
 	ReferencingKCs []string // KCs in the same namespace with spec.data.networkNamespaceName == name → HARD GATE
 	NCRefs         []string // NCs in the same namespace referencing by name or by vlan<id> interface → HARD GATE
 	IPAllocCount   int      // ipallocations referencing this netns; -1 = CRD absent on this zone
-	GhostAssocIDs  []string // status association ids with no live KC in the namespace — informational
-	VlanKnown      bool     // status.vlanId assigned; when false the vlan-interface match cannot apply
+	// IPAllocUnevaluated names ipallocations in the netns' namespace whose
+	// spec.networkNamespaceName could not be read (absent field, or not a
+	// string). Their target is UNKNOWN, which is not the same as "not this
+	// netns" — so they are a HARD GATE too: an unreadable record must never
+	// be counted as evidence of absence.
+	IPAllocUnevaluated []string
+	GhostAssocIDs      []string // status association ids with no live KC in the namespace — informational
+	VlanKnown          bool     // status.vlanId assigned; when false the vlan-interface match cannot apply
 }
 
-// Blocked reports whether any hard gate refuses deletion.
+// Blocked reports whether any hard gate refuses deletion. Unevaluated
+// ipallocations block on purpose (fail-closed): the alternative is deleting
+// external NAM state while records that may point at it are unaccounted for.
 func (e *Evidence) Blocked() bool {
-	return len(e.ReferencingKCs) > 0 || len(e.NCRefs) > 0 || e.IPAllocCount > 0
+	return len(e.ReferencingKCs) > 0 || len(e.NCRefs) > 0 ||
+		e.IPAllocCount > 0 || len(e.IPAllocUnevaluated) > 0
 }
 
 func vlanInterfaceName(vlan int) string { return fmt.Sprintf("vlan%d", vlan) }
@@ -91,8 +100,17 @@ func EvidenceFor(s *Snapshot, nn *vitiv1alpha1.NetworkNamespace) Evidence {
 			if a.GetNamespace() != nn.Namespace {
 				continue
 			}
-			ref, _, _ := unstructured.NestedString(a.Object, "spec", "networkNamespaceName")
-			if ref == nn.Name {
+			// The field is empirically the one the static-ip-operator writes
+			// (observed: spec.networkNamespaceName == "vitistack-amk-qr97").
+			// found/err are honoured rather than discarded: dropping them
+			// turns a schema change or a type mismatch into ref == "" for
+			// EVERY record, i.e. a hard gate that silently counts zero and
+			// reports itself as passed.
+			ref, found, err := unstructured.NestedString(a.Object, "spec", "networkNamespaceName")
+			switch {
+			case err != nil || !found:
+				ev.IPAllocUnevaluated = append(ev.IPAllocUnevaluated, a.GetName())
+			case ref == nn.Name:
 				n++
 			}
 		}

@@ -112,6 +112,44 @@ func TestEvidenceIPAllocations(t *testing.T) {
 	}
 }
 
+// TestEvidenceIPAllocUnreadableFieldFailsClosed pins the third load-bearing
+// safety property: an ipallocation whose spec.networkNamespaceName cannot be
+// read says NOTHING about which netns it belongs to, and must never be
+// counted as "not this one". Before this, the found-bool and error were
+// discarded, so a renamed or retyped field made every lookup return "" —
+// IPAllocCount 0, gate reported as passed, netns deleted with live
+// allocations against it.
+func TestEvidenceIPAllocUnreadableFieldFailsClosed(t *testing.T) {
+	target := nn("team-a", "team-a-x1", 2100)
+
+	missing := unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{}}}
+	missing.SetNamespace("team-a")
+	missing.SetName("no-such-field")
+
+	wrongType := unstructured.Unstructured{Object: map[string]any{
+		"spec": map[string]any{"networkNamespaceName": 42}, // not a string
+	}}
+	wrongType.SetNamespace("team-a")
+	wrongType.SetName("wrong-type")
+
+	elsewhere := ipalloc("team-b", "other-namespace", "")
+
+	s := &Snapshot{IPAllocCRDPresent: true, IPAllocs: []unstructured.Unstructured{
+		missing, wrongType, elsewhere,
+	}}
+	ev := EvidenceFor(s, target)
+
+	if ev.IPAllocCount != 0 {
+		t.Errorf("IPAllocCount = %d, want 0 — none of these is a confirmed reference", ev.IPAllocCount)
+	}
+	if len(ev.IPAllocUnevaluated) != 2 {
+		t.Fatalf("IPAllocUnevaluated = %v, want the two unreadable records in team-a", ev.IPAllocUnevaluated)
+	}
+	if !ev.Blocked() {
+		t.Error("unreadable ipallocations must block: unknown is not absence")
+	}
+}
+
 func TestEvidenceIPAllocCRDAbsent(t *testing.T) {
 	ev := EvidenceFor(&Snapshot{IPAllocCRDPresent: false}, nn("team-a", "team-a-x1", 2100))
 	if ev.IPAllocCount != -1 {

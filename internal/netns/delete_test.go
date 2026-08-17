@@ -7,6 +7,7 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -79,6 +80,83 @@ func TestDeleteAndWaitAlreadyTerminating(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "already Terminating") {
 		t.Errorf("output should mention already Terminating, got: %q", buf.String())
+	}
+}
+
+// TestDeleteAndWaitHangingGetStillTimesOut pins the per-call deadline. The
+// pos1 availability zone serves NetworkNamespaces behind a CRD conversion
+// webhook whose cert fails verification, so requests HANG rather than error:
+// a Get that never returns used to park the command forever, because the
+// timeout is only checked BETWEEN polls. Each API call now carries its own
+// bound, so the hang degrades into the ordinary "could not verify" verdict.
+func TestDeleteAndWaitHangingGetStillTimesOut(t *testing.T) {
+	target := nn("team-a", "team-a-x1", 2100)
+	target.Finalizers = []string{"networknamespace.vitistack.io/finalizer"}
+
+	c := fake.NewClientBuilder().WithScheme(newScheme(t, false)).WithObjects(target).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, cl ctrlclient.WithWatch, key ctrlclient.ObjectKey, obj ctrlclient.Object, opts ...ctrlclient.GetOption) error {
+				<-ctx.Done() // never answers, exactly like the broken webhook
+				return ctx.Err()
+			},
+		}).Build()
+
+	saved := pollInterval
+	pollInterval = 10 * time.Millisecond
+	defer func() { pollInterval = saved }()
+
+	done := make(chan error, 1)
+	var buf strings.Builder
+	go func() { done <- DeleteAndWait(context.Background(), c, target, 50*time.Millisecond, &buf) }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("want an error: the object's state was never observed")
+		}
+		if !strings.Contains(err.Error(), "could not verify") {
+			t.Errorf("a hanging Get must yield the query-error verdict, got: %v", err)
+		}
+		if !strings.Contains(strings.ToLower(err.Error()), "do not strip") {
+			t.Errorf("verdict must still forbid stripping the finalizer, got: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("DeleteAndWait hung: the per-call deadline did not bound the Get")
+	}
+}
+
+// TestDeleteAndWaitPassesDeleteOptions proves the UID precondition the cmd
+// layer attaches actually reaches the API call: a real apiserver rejects the
+// delete with a conflict when the UID no longer matches, which is what stops
+// a deleted-and-recreated namespace of the same name from being torn down by
+// a verdict computed against its predecessor. (The fake client only enforces
+// the ResourceVersion precondition, so the option is captured rather than
+// exercised.)
+func TestDeleteAndWaitPassesDeleteOptions(t *testing.T) {
+	target := nn("team-a", "team-a-x1", 2100)
+	target.UID = "the-live-one"
+
+	var seen *ctrlclient.DeleteOptions
+	c := fake.NewClientBuilder().WithScheme(newScheme(t, false)).WithObjects(target).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(ctx context.Context, cl ctrlclient.WithWatch, obj ctrlclient.Object, opts ...ctrlclient.DeleteOption) error {
+				seen = &ctrlclient.DeleteOptions{}
+				seen.ApplyOptions(opts)
+				return cl.Delete(ctx, obj, opts...)
+			},
+		}).Build()
+
+	uid := types.UID("the-live-one")
+	var buf strings.Builder
+	if err := DeleteAndWait(t.Context(), c, target, 5*time.Second, &buf,
+		ctrlclient.Preconditions{UID: &uid}); err != nil {
+		t.Fatalf("DeleteAndWait: %v", err)
+	}
+	if seen == nil || seen.Preconditions == nil || seen.Preconditions.UID == nil {
+		t.Fatalf("DeleteOptions reaching the API = %+v, want a UID precondition", seen)
+	}
+	if *seen.Preconditions.UID != uid {
+		t.Errorf("precondition UID = %q, want %q", *seen.Preconditions.UID, uid)
 	}
 }
 

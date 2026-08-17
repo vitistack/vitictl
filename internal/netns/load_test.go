@@ -81,7 +81,7 @@ func TestLoadIPAllocCRDAbsent(t *testing.T) {
 	// *unstructured.UnstructuredList carrying an explicit GVK on first List(),
 	// so the call instead succeeds with err == nil and zero items — which is
 	// indistinguishable from "CRD present but empty" and can't exercise Load's
-	// CRD-absent branch at all. See task-2-report.md for the full trace.
+	// CRD-absent branch at all.
 	//
 	// A real cluster's genuine failure mode for an uninstalled CRD is the
 	// RESTMapper finding no match: meta.NoKindMatchError. We inject that via
