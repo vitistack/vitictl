@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"text/tabwriter"
 	"time"
 
@@ -24,6 +25,15 @@ var (
 	nnOrphansZoneTimeout time.Duration
 )
 
+// zoneWarn reports a non-fatal problem through the command's own stderr
+// rather than the package-level warn (which writes to os.Stderr directly), so
+// that coverage reporting is capturable end to end in a test.
+func zoneWarn(cmd *cobra.Command) func(error) {
+	return func(err error) {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "⚠️  %v\n", err)
+	}
+}
+
 // loadZoneSnapshot bounds one availability zone's queries so a single
 // unhealthy zone cannot stall a fleet-wide audit. This is not theoretical:
 // a zone whose CRD conversion webhook is broken makes the API server hang
@@ -40,6 +50,66 @@ func loadZoneSnapshot(ctx context.Context, c *kube.Client, namespace string, tim
 	return snap, err
 }
 
+// zoneSnapshot is one zone's audit result, kept positional so results can be
+// consumed in client order.
+type zoneSnapshot struct {
+	snap *netns.Snapshot
+	err  error
+}
+
+// loadAllZones snapshots every availability zone concurrently, following
+// collectClusters (cmd/kubernetescluster.go): wall clock is the slowest zone
+// rather than the sum, which matters here because an unhealthy zone can only
+// fail by burning its entire --zone-timeout. Each goroutine writes to its own
+// slot and shares nothing; results stay in client order so output and
+// coverage accounting remain deterministic.
+func loadAllZones(ctx context.Context, clients []*kube.Client, namespace string, timeout time.Duration) []zoneSnapshot {
+	out := make([]zoneSnapshot, len(clients))
+	var wg sync.WaitGroup
+	for i, c := range clients {
+		wg.Add(1)
+		go func(i int, c *kube.Client) {
+			defer wg.Done()
+			snap, err := loadZoneSnapshot(ctx, c, namespace, timeout)
+			out[i] = zoneSnapshot{snap: snap, err: err}
+		}(i, c)
+	}
+	wg.Wait()
+	return out
+}
+
+// auditSummary renders the coverage accounting for `nn orphans`.
+//
+// configured is the number of CONFIGURED availability zones — never the
+// number that happened to connect. A zone whose kubeconfig is unreachable is
+// dropped by ConnectAll before any query runs, so counting only the survivors
+// made an audit of 2 zones out of 5 print "2/2 availability zone(s) audited"
+// and suppress the incomplete-audit warning entirely: a fleet-wide clean
+// verdict issued over three zones nobody looked at.
+//
+// A non-empty warning means the caller must fail the command: partial
+// coverage has to be detectable by exit code, not only by reading stderr.
+// With zero coverage there is no line at all — a clean-sweep broom over an
+// audit that never happened is the worst possible output.
+func auditSummary(orphans, audited, configured int) (line, warning string) {
+	scope := fmt.Sprintf("%d/%d availability zone(s) audited", audited, configured)
+	switch {
+	case audited == 0:
+		warning = fmt.Sprintf("incomplete audit: NO availability zone could be audited (0/%d) — "+
+			"nothing was verified, and this is NOT a clean result", configured)
+		return "", warning
+	case orphans == 0:
+		line = fmt.Sprintf("🧹 no orphaned networknamespaces found (%s)\n", scope)
+	default:
+		line = fmt.Sprintf("\n%d orphan(s), %s. Delete deliberately with: viti nn delete <name>\n", orphans, scope)
+	}
+	if audited < configured {
+		warning = fmt.Sprintf("incomplete audit: %d of %d availability zone(s) could not be audited — "+
+			"orphaned networknamespaces there are NOT listed above", configured-audited, configured)
+	}
+	return line, warning
+}
+
 var nnOrphansCmd = &cobra.Command{
 	Use:   "orphans",
 	Short: "List NetworkNamespaces no KubernetesCluster references (housekeeping audit)",
@@ -48,12 +118,17 @@ var nnOrphansCmd = &cobra.Command{
 
 Columns preview the 'viti nn delete' gates:
   NC-REFS      NetworkConfigurations still bound to the netns (by name or vlan)
-  IPALLOCS     IPAllocations still referencing it (n/a where the CRD is absent)
+  IPALLOCS     IPAllocations still referencing it (n/a where the CRD is absent);
+               a trailing "+N?" counts records whose spec.networkNamespaceName
+               could not be read — unknown, so delete refuses on them
   GHOST-ASSOC  stale status association ids with no live cluster — a known
                cosmetic operator bug, shown for visibility, never trusted
 
 Read-only. An orphan is a deletion CANDIDATE, not a verdict: an empty team
-namespace may be about to receive new clusters.`,
+namespace may be about to receive new clusters.
+
+Exits non-zero if any configured availability zone could not be audited, so
+automation cannot mistake partial coverage for a clean fleet.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := context.Background()
@@ -61,52 +136,71 @@ namespace may be about to receive new clusters.`,
 		if err != nil {
 			return err
 		}
-		clients, err := kube.ConnectAll(ctx, zones, true, warn)
+		warnf := zoneWarn(cmd)
+		// allowPartial: a fleet audit is still worth running with a zone down,
+		// as long as the coverage it reports is honest about it — which is
+		// what auditSummary and the non-zero exit below are for.
+		clients, err := kube.ConnectAll(ctx, zones, true, warnf)
 		if err != nil {
 			return err
 		}
 
-		tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-		_, _ = fmt.Fprintln(tw, "AZ\tNAMESPACE\tNAME\tVLAN\tIPV4 PREFIX\tPHASE\tAGE\tNC-REFS\tIPALLOCS\tGHOST-ASSOC")
-		total := 0
-		audited := len(clients)
-		for _, c := range clients {
-			snap, err := loadZoneSnapshot(ctx, c, nnOrphansNamespace, nnOrphansZoneTimeout)
-			if err != nil {
-				warn(fmt.Errorf("availability zone %q NOT audited: %w", c.AZ.Name, err))
-				audited--
+		var rows []string
+		total, audited := 0, 0
+		for i, res := range loadAllZones(ctx, clients, nnOrphansNamespace, nnOrphansZoneTimeout) {
+			c := clients[i]
+			if res.err != nil {
+				warnf(fmt.Errorf("availability zone %q NOT audited: %w", c.AZ.Name, res.err))
 				continue
 			}
-			for _, o := range netns.Orphans(snap) {
+			audited++
+			for _, o := range netns.Orphans(res.snap) {
 				total++
-				ipallocs := "n/a"
-				if o.Ev.IPAllocCount >= 0 {
-					ipallocs = strconv.Itoa(o.Ev.IPAllocCount)
-				}
-				_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\t%s\t%d\t%s\t%d\n",
+				rows = append(rows, fmt.Sprintf("%s\t%s\t%s\t%d\t%s\t%s\t%s\t%d\t%s\t%d",
 					c.AZ.Name, o.NN.Namespace, o.NN.Name,
 					o.NN.Status.VlanID, valueOrDash(o.NN.Status.IPv4Prefix), o.NN.Status.Phase,
 					printer.Age(o.NN.CreationTimestamp),
-					len(o.Ev.NCRefs), ipallocs, len(o.Ev.GhostAssocIDs))
+					len(o.Ev.NCRefs), ipAllocCell(o.Ev), len(o.Ev.GhostAssocIDs)))
 			}
 		}
-		if err := tw.Flush(); err != nil {
-			return err
+
+		// House style (cmd/resource_builder.go): no header without rows.
+		if len(rows) > 0 {
+			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			_, _ = fmt.Fprintln(tw, "AZ\tNAMESPACE\tNAME\tVLAN\tIPV4 PREFIX\tPHASE\tAGE\tNC-REFS\tIPALLOCS\tGHOST-ASSOC")
+			for _, r := range rows {
+				_, _ = fmt.Fprintln(tw, r)
+			}
+			if err := tw.Flush(); err != nil {
+				return err
+			}
 		}
+
 		// Coverage is reported explicitly: a zone that could not be queried
 		// must never read as a zone with nothing in it.
-		scope := fmt.Sprintf("%d/%d availability zone(s) audited", audited, len(clients))
-		if total == 0 {
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "🧹 no orphaned networknamespaces found (%s)\n", scope)
-		} else {
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "\n%d orphan(s), %s. Delete deliberately with: viti nn delete <name>\n", total, scope)
+		line, warning := auditSummary(total, audited, len(zones))
+		if line != "" {
+			_, _ = fmt.Fprint(cmd.OutOrStdout(), line)
 		}
-		if audited < len(clients) {
-			_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
-				"⚠️  incomplete audit: %d zone(s) were skipped — orphans there are NOT listed above\n", len(clients)-audited)
+		if warning != "" {
+			return errors.New(warning)
 		}
 		return nil
 	},
+}
+
+// ipAllocCell renders the IPALLOCS column: "n/a" where the CRD is absent,
+// otherwise the count, with "+N?" appended for records whose target could not
+// be determined.
+func ipAllocCell(ev netns.Evidence) string {
+	cell := "n/a"
+	if ev.IPAllocCount >= 0 {
+		cell = strconv.Itoa(ev.IPAllocCount)
+	}
+	if n := len(ev.IPAllocUnevaluated); n > 0 {
+		cell += fmt.Sprintf("+%d?", n)
+	}
+	return cell
 }
 
 var (
@@ -121,22 +215,38 @@ type nnHit struct {
 	nn     *vitiv1alpha1.NetworkNamespace
 }
 
-// findNetNSAcrossAZs resolves exactly one NetworkNamespace by name — the same
-// exactly-one discipline as kc delete: zero hits and ambiguous hits are both
-// errors, never a guess. A zone that cannot be queried aborts the search
-// rather than narrowing it: silently resolving "the only match" out of a
-// partially-searched fleet is how the wrong object gets deleted.
+// findNetNSAcrossAZs resolves exactly one NetworkNamespace by name: zero hits
+// and ambiguous hits are both errors, never a guess. A zone that cannot be
+// queried aborts the search rather than narrowing it — silently resolving
+// "the only match" out of a partially-searched fleet is how the wrong object
+// gets deleted.
+//
+// That guarantee only holds if every configured zone is represented in
+// clients, so callers must connect without allowPartial (or refuse on a short
+// client list themselves) before calling this. kc delete does narrow
+// silently at the connect stage; this is deliberately stricter.
 func findNetNSAcrossAZs(ctx context.Context, clients []*kube.Client, name, namespace string, zoneTimeout time.Duration) (*nnHit, error) {
+	lists := make([]*vitiv1alpha1.NetworkNamespaceList, len(clients))
+	errs := make([]error, len(clients))
+	var wg sync.WaitGroup
+	for i, c := range clients {
+		wg.Add(1)
+		go func(i int, c *kube.Client) {
+			defer wg.Done()
+			lists[i], errs[i] = listZoneNetNS(ctx, c, namespace, zoneTimeout)
+		}(i, c)
+	}
+	wg.Wait()
+
 	var matches []nnHit
-	for _, c := range clients {
-		l, err := listZoneNetNS(ctx, c, namespace, zoneTimeout)
-		if err != nil {
+	for i, c := range clients {
+		if errs[i] != nil {
 			return nil, fmt.Errorf("availability zone %q could not be searched, so %q cannot be resolved unambiguously: %w",
-				c.AZ.Name, name, err)
+				c.AZ.Name, name, errs[i])
 		}
-		for i := range l.Items {
-			if l.Items[i].Name == name {
-				matches = append(matches, nnHit{client: c, nn: &l.Items[i]})
+		for j := range lists[i].Items {
+			if lists[i].Items[j].Name == name {
+				matches = append(matches, nnHit{client: c, nn: &lists[i].Items[j]})
 			}
 		}
 	}
@@ -174,9 +284,11 @@ func listZoneNetNS(ctx context.Context, c *kube.Client, namespace string, timeou
 
 // confirmTypedName requires the operator to type the resource name back —
 // a stronger guard than yes/no for an irreversible operation. Reads from
-// cmd.InOrStdin so it is testable and scriptable.
-func confirmTypedName(cmd *cobra.Command, what, name string) error {
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Type the %s name to confirm deletion: ", what)
+// cmd.InOrStdin so it is testable and scriptable. Input that ends without a
+// newline is refused rather than accepted: for a teardown of external state,
+// a truncated answer is not consent (use --yes to script it).
+func confirmTypedName(cmd *cobra.Command, subject, action, name string) error {
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Type the %s name to confirm %s: ", subject, action)
 	r := bufio.NewReader(cmd.InOrStdin())
 	answer, err := r.ReadString('\n')
 	if err != nil {
@@ -198,7 +310,14 @@ external NAM state (VLAN, IPv4/IPv6 prefixes, egress IP).
 Hard gates — ANY of these refuses the deletion (no override):
   • a KubernetesCluster in the namespace references it (spec.data.networkNamespaceName)
   • a NetworkConfiguration is bound to it (by name or vlan<id> interface)
-  • IPAllocations referencing it remain (where that CRD exists)
+  • IPAllocations referencing it remain (where that CRD exists), including any
+    whose spec.networkNamespaceName could not be read — unknown is not absence
+
+Every configured availability zone must be reachable: a same-named
+networknamespace on a zone that could not be searched would make the target
+ambiguous, and ambiguity is never resolved by guessing. The gates are
+re-checked after confirmation, so a cluster created while the prompt was open
+is not deleted around.
 
 The stale status summary (associatedKubernetesClusterIds) is shown but never
 trusted. Finalizers are never stripped: if teardown hangs, investigate the
@@ -207,15 +326,26 @@ networknamespace operator on the management cluster.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 		ctx := context.Background()
+		out := cmd.OutOrStdout()
 
 		zones, err := kube.ResolveAvailabilityZones(AvailabilityZone())
 		if err != nil {
 			return err
 		}
-		clients, err := kube.ConnectAll(ctx, zones, true, warn)
+		clients, err := kube.ConnectAll(ctx, zones, true, zoneWarn(cmd))
 		if err != nil {
 			return err
 		}
+		// Unlike the audit, a destructive resolve tolerates no missing zone:
+		// ConnectAll drops unreachable ones with a warning, and a netns of the
+		// same name sitting on a dropped zone would never be seen as the
+		// ambiguity it is.
+		if len(clients) != len(zones) {
+			return fmt.Errorf("refusing to delete %q: %d of %d configured availability zone(s) could not be connected (warnings above), "+
+				"so a same-named networknamespace there could not be ruled out — fix the connection, or narrow the search with -z",
+				name, len(zones)-len(clients), len(zones))
+		}
+
 		hit, err := findNetNSAcrossAZs(ctx, clients, name, nnDeleteNamespace, nnDeleteZoneTimeout)
 		if err != nil {
 			return err
@@ -227,7 +357,6 @@ networknamespace operator on the management cluster.`,
 		}
 		ev := netns.EvidenceFor(snap, hit.nn)
 
-		out := cmd.OutOrStdout()
 		_, _ = fmt.Fprintf(out, "\nAbout to DELETE networknamespace:\n")
 		_, _ = fmt.Fprintf(out, "  availability zone : %s\n", hit.client.AZ.Name)
 		_, _ = fmt.Fprintf(out, "  namespace         : %s\n", hit.nn.Namespace)
@@ -238,15 +367,7 @@ networknamespace operator on the management cluster.`,
 			valueOrDash(hit.nn.Status.IPv6Prefix), valueOrDash(hit.nn.Status.IPv4EgressIP))
 
 		if ev.Blocked() {
-			for _, k := range ev.ReferencingKCs {
-				_, _ = fmt.Fprintf(out, "  ❌ KubernetesCluster still references it: %s/%s\n", hit.nn.Namespace, k)
-			}
-			for _, n := range ev.NCRefs {
-				_, _ = fmt.Fprintf(out, "  ❌ NetworkConfiguration still bound: %s/%s\n", hit.nn.Namespace, n)
-			}
-			if ev.IPAllocCount > 0 {
-				_, _ = fmt.Fprintf(out, "  ❌ %d IPAllocation(s) still reference it\n", ev.IPAllocCount)
-			}
+			printBlockingGates(cmd, hit.nn.Namespace, &ev)
 			return fmt.Errorf("refusing to delete %s: it is in use (gates above)", name)
 		}
 
@@ -267,12 +388,75 @@ networknamespace operator on the management cluster.`,
 		_, _ = fmt.Fprintf(out, "\nThis releases the VLAN and prefixes in NAM and is IRREVERSIBLE.\n")
 
 		if !nnDeleteYes {
-			if err := confirmTypedName(cmd, "networknamespace", name); err != nil {
+			if err := confirmTypedName(cmd, "networknamespace", "deletion", name); err != nil {
 				return err
 			}
 		}
-		return netns.DeleteAndWait(ctx, hit.client.Ctrl, hit.nn, nnDeleteTimeout, out)
+
+		// The evidence above was gathered before a prompt that may have been
+		// open for hours. Re-check against fresh state: a KubernetesCluster
+		// created against this netns in the meantime must block, not be
+		// deleted around.
+		target, err := recheckGates(ctx, cmd, hit)
+		if err != nil {
+			return err
+		}
+
+		opts := []ctrlclient.DeleteOption{}
+		if uid := target.UID; uid != "" {
+			// Delete exactly the object the gates were evaluated against, not
+			// whatever now answers to that name.
+			opts = append(opts, ctrlclient.Preconditions{UID: &uid})
+		}
+		return netns.DeleteAndWait(ctx, hit.client.Ctrl, target, nnDeleteTimeout, out, opts...)
 	},
+}
+
+// printBlockingGates prints every hard gate that refuses the deletion.
+func printBlockingGates(cmd *cobra.Command, namespace string, ev *netns.Evidence) {
+	out := cmd.OutOrStdout()
+	for _, k := range ev.ReferencingKCs {
+		_, _ = fmt.Fprintf(out, "  ❌ KubernetesCluster still references it: %s/%s\n", namespace, k)
+	}
+	for _, n := range ev.NCRefs {
+		_, _ = fmt.Fprintf(out, "  ❌ NetworkConfiguration still bound: %s/%s\n", namespace, n)
+	}
+	if ev.IPAllocCount > 0 {
+		_, _ = fmt.Fprintf(out, "  ❌ %d IPAllocation(s) still reference it\n", ev.IPAllocCount)
+	}
+	if n := len(ev.IPAllocUnevaluated); n > 0 {
+		_, _ = fmt.Fprintf(out, "  ❌ %d IPAllocation(s) could not be evaluated (no readable spec.networkNamespaceName): %s\n",
+			n, strings.Join(ev.IPAllocUnevaluated, ", "))
+		_, _ = fmt.Fprintf(out, "     inspect them with: kubectl -n %s get ipallocations.vitistack.io -o yaml\n", namespace)
+	}
+}
+
+// recheckGates re-reads the zone and re-evaluates every hard gate immediately
+// before the delete, returning the fresh object to act on. Nothing is deleted
+// on a failed or inconclusive re-check.
+func recheckGates(ctx context.Context, cmd *cobra.Command, hit *nnHit) (*vitiv1alpha1.NetworkNamespace, error) {
+	snap, err := loadZoneSnapshot(ctx, hit.client, hit.nn.Namespace, nnDeleteZoneTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("re-checking the gates before deleting (nothing deleted): %w", err)
+	}
+	var fresh *vitiv1alpha1.NetworkNamespace
+	for i := range snap.NetNSs {
+		if snap.NetNSs[i].Name == hit.nn.Name {
+			fresh = &snap.NetNSs[i]
+			break
+		}
+	}
+	if fresh == nil {
+		return nil, fmt.Errorf("networknamespace %s/%s is no longer there — it was deleted by someone else while this command was waiting; nothing done",
+			hit.nn.Namespace, hit.nn.Name)
+	}
+	ev := netns.EvidenceFor(snap, fresh)
+	if ev.Blocked() {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "\n⚠️  state changed since the gates were checked:\n")
+		printBlockingGates(cmd, fresh.Namespace, &ev)
+		return nil, fmt.Errorf("refusing to delete %s: it became in use while this command was waiting (gates above); nothing deleted", fresh.Name)
+	}
+	return fresh, nil
 }
 
 func init() {
