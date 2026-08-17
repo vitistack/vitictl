@@ -183,10 +183,45 @@ viti kc etcd-restore <name> --from ./snap.bin [--node <addr>] [--yes] [--skip-ha
 viti machine console <name> [--az zone] [-n namespace]
 ```
 
+### Network namespaces (alias: `nn`)
+
+Beyond the shared `list` / `get` / `search` verbs, `nn` has two housekeeping
+commands. A NetworkNamespace holds external network state (VLAN, IPv4/IPv6
+prefixes, egress IP) in NAM, so both are built around the operator's
+finalizer.
+
+```
+# Read-only fleet audit: NetworkNamespaces no KubernetesCluster references.
+# Columns preview the delete gates (NC-REFS, IPALLOCS, GHOST-ASSOC). Reports
+# how many availability zones were actually audited, and exits non-zero if
+# any could not be — partial coverage is never reported as a clean fleet.
+viti nn orphans [-n namespace] [--zone-timeout 30s]
+
+# Delete one UNUSED NetworkNamespace (DESTRUCTIVE, irreversible).
+viti nn delete <name> [-n namespace] [--yes] [--timeout 2m]
+```
+
+`nn delete` refuses — with no override — if a KubernetesCluster references
+the namespace, a NetworkConfiguration is still bound to it (by name or
+`vlan<id>` interface), or IPAllocations referencing it remain. The stale
+`status.associatedKubernetesClusterIds` summary is displayed but never gates
+anything. Every configured availability zone must be reachable, so a
+same-named namespace elsewhere cannot go unseen, and the gates are re-checked
+after confirmation.
+
+**Finalizer contract:** deletion is delete-and-wait. The operator tears down
+the external NAM state and signals completion by releasing
+`networknamespace.vitistack.io/finalizer` — the object disappearing is the
+proof that teardown happened. `viti` never strips or patches finalizers. If
+the wait times out, the result is reported NOT CLEAN and the external state is
+still allocated: investigate the networknamespace operator on the management
+cluster rather than forcing the object away.
+
 ### Other CRDs
 
 The remaining Vitistack CRDs share the same `list` / `get <name>` / `search
-[query]` pattern with `-o` support. Each has short aliases:
+[query]` pattern with `-o` support (`networknamespace` adds the two commands
+above). Each has short aliases:
 
 | Command                      | Aliases               | Scope      | Emoji |
 |------------------------------|-----------------------|------------|-------|
