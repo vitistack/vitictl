@@ -208,7 +208,7 @@ deregistration is delegated to the viti-nhn plugin when installed.`,
 		}
 
 		runner, err := decommission.New(hit.client.Ctrl, guest, hit.cluster, decommission.Options{
-			Out:       cmd.OutOrStdout(),
+			Out: cmd.OutOrStdout(),
 		})
 		if err != nil {
 			return err
