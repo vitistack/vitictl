@@ -2,6 +2,7 @@ package netns
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -108,5 +109,68 @@ func TestLoadIPAllocCRDAbsent(t *testing.T) {
 	}
 	if s.IPAllocCRDPresent {
 		t.Error("IPAllocCRDPresent must be false when the kind does not exist")
+	}
+}
+
+// TestLoadIPAllocGenericListErrorPropagates covers the safety-critical
+// default: branch of Load's ipallocations switch — an opaque error (etcd
+// timeout, RBAC denial, whatever) is NOT one of the two recognized
+// CRD-absence signals and must be returned as a real error, never silently
+// read as "CRD absent" (which would wrongly report IPAllocCount == -1 and
+// let a blocked deletion through as clear).
+func TestLoadIPAllocGenericListErrorPropagates(t *testing.T) {
+	sch := newScheme(t, true)
+	genericErr := errors.New("etcd timeout")
+	c := fake.NewClientBuilder().WithScheme(sch).
+		WithObjects(nn("team-a", "team-a-x1", 2100)).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, cl ctrlclient.WithWatch, list ctrlclient.ObjectList, opts ...ctrlclient.ListOption) error {
+				if list.GetObjectKind().GroupVersionKind() == ipAllocationListGVK {
+					return genericErr
+				}
+				return cl.List(ctx, list, opts...)
+			},
+		}).Build()
+
+	s, err := Load(t.Context(), c, "")
+	if err == nil {
+		t.Fatal("Load must return an error for a generic ipallocations List failure, got nil")
+	}
+	if !errors.Is(err, genericErr) {
+		t.Errorf("Load error = %v, want it to wrap %v", err, genericErr)
+	}
+	if s != nil {
+		t.Errorf("Load must return a nil Snapshot on error, got %+v", s)
+	}
+}
+
+// TestLoadKubernetesClusterListErrorPropagates covers the same
+// error-must-not-be-swallowed requirement for one of the typed List calls
+// (not just the unstructured ipallocations path): a generic failure listing
+// KubernetesClusters must abort Load with an error, not return a partially
+// populated Snapshot.
+func TestLoadKubernetesClusterListErrorPropagates(t *testing.T) {
+	sch := newScheme(t, true)
+	genericErr := errors.New("apiserver unavailable")
+	c := fake.NewClientBuilder().WithScheme(sch).
+		WithObjects(nn("team-a", "team-a-x1", 2100)).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, cl ctrlclient.WithWatch, list ctrlclient.ObjectList, opts ...ctrlclient.ListOption) error {
+				if _, ok := list.(*vitiv1alpha1.KubernetesClusterList); ok {
+					return genericErr
+				}
+				return cl.List(ctx, list, opts...)
+			},
+		}).Build()
+
+	s, err := Load(t.Context(), c, "")
+	if err == nil {
+		t.Fatal("Load must return an error for a generic KubernetesClusterList failure, got nil")
+	}
+	if !errors.Is(err, genericErr) {
+		t.Errorf("Load error = %v, want it to wrap %v", err, genericErr)
+	}
+	if s != nil {
+		t.Errorf("Load must return a nil Snapshot on error, got %+v", s)
 	}
 }
