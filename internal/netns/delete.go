@@ -32,15 +32,18 @@ func clientKey(nn *vitiv1alpha1.NetworkNamespace) ctrlclient.ObjectKey {
 // lastErr path, and still produces the "could not verify" verdict. A deadline
 // on the outer ctx would instead return a bare context error and lose the
 // NOT CLEAN / do-not-strip framing that the whole command exists to deliver.
-func callCtx(ctx context.Context, deadline time.Time) (context.Context, context.CancelFunc) {
-	budget := 2 * pollInterval
-	if remaining := time.Until(deadline); remaining > 0 && remaining < budget {
-		budget = remaining
-	}
-	if budget <= 0 {
-		budget = pollInterval
-	}
-	return context.WithTimeout(ctx, budget)
+//
+// The budget is fixed rather than shrunk to the wall-clock time remaining.
+// Shrinking looks tidier but corrupts the diagnosis: the last poll before the
+// deadline (or every poll, when --timeout is set below normal API latency)
+// would get a millisecond-scale budget, fail with DeadlineExceeded, set
+// lastErr, and report "could not verify — the API kept erroring" for an
+// object the API answered about perfectly well. That is the wrong verdict:
+// a finalizer still held must read NOT CLEAN, which is the whole point of
+// waiting. The cost of not shrinking is bounded and small — the wait can
+// overshoot --timeout by at most one budget (2*pollInterval, 6s by default).
+func callCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, 2*pollInterval)
 }
 
 // DeleteAndWait deletes one NetworkNamespace and waits until the operator has
@@ -56,7 +59,7 @@ func DeleteAndWait(ctx context.Context, c ctrlclient.Client, nn *vitiv1alpha1.Ne
 	deadline := time.Now().Add(timeout)
 
 	if nn.DeletionTimestamp.IsZero() {
-		dctx, cancel := callCtx(ctx, deadline)
+		dctx, cancel := callCtx(ctx)
 		err := c.Delete(dctx, nn, opts...)
 		cancel()
 		switch {
@@ -79,7 +82,7 @@ func DeleteAndWait(ctx context.Context, c ctrlclient.Client, nn *vitiv1alpha1.Ne
 	var lastErr error
 	for {
 		var cur vitiv1alpha1.NetworkNamespace
-		gctx, cancel := callCtx(ctx, deadline)
+		gctx, cancel := callCtx(ctx)
 		err := c.Get(gctx, clientKey(nn), &cur)
 		cancel()
 		switch {

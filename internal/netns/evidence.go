@@ -100,12 +100,19 @@ func EvidenceFor(s *Snapshot, nn *vitiv1alpha1.NetworkNamespace) Evidence {
 			if a.GetNamespace() != nn.Namespace {
 				continue
 			}
-			// The field is empirically the one the static-ip-operator writes
-			// (observed: spec.networkNamespaceName == "vitistack-amk-qr97").
 			// found/err are honoured rather than discarded: dropping them
 			// turns a schema change or a type mismatch into ref == "" for
 			// EVERY record, i.e. a hard gate that silently counts zero and
 			// reports itself as passed.
+			//
+			// Treating an unreadable record as blocking cannot produce a
+			// false block on a conformant object: the v1alpha2 CRD schema
+			// lists networkNamespaceName in spec.required with minLength: 1
+			// (verified against the live CRD, 2026-08-17), so the API server
+			// rejects any IPAllocation that omits it or leaves it empty.
+			// A record that lands in the unevaluated bucket is therefore
+			// genuinely anomalous — a schema change, a type mismatch, or a
+			// hand-edited object — and is worth refusing on.
 			ref, found, err := unstructured.NestedString(a.Object, "spec", "networkNamespaceName")
 			switch {
 			case err != nil || !found:

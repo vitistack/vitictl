@@ -125,6 +125,63 @@ func TestDeleteAndWaitHangingGetStillTimesOut(t *testing.T) {
 	}
 }
 
+// TestDeleteAndWaitShortTimeoutStillDiagnosesFinalizer pins the primary
+// diagnostic against the per-call budget.
+//
+// The budget used to be shrunk to the wall-clock time remaining, so a poll
+// starting near the deadline — or every poll, when --timeout is below normal
+// API latency, as here — got a budget too small to complete. The Get failed
+// with DeadlineExceeded, lastErr was set, and the command reported "could not
+// verify … the API kept erroring" about an API that answered fine. The
+// correct verdict for a held finalizer is NOT CLEAN: external NAM state is
+// still allocated and the operator is what needs investigating.
+//
+// Timing is chosen so the two behaviours cannot overlap: the API takes 60ms,
+// --timeout is 30ms (so any remaining-based budget is far too small), and the
+// fixed budget is 2*pollInterval = 100ms (comfortably more than enough).
+func TestDeleteAndWaitShortTimeoutStillDiagnosesFinalizer(t *testing.T) {
+	const apiLatency = 60 * time.Millisecond
+
+	target := nn("team-a", "team-a-x1", 2100)
+	target.Finalizers = []string{"networknamespace.vitistack.io/finalizer"}
+
+	c := fake.NewClientBuilder().WithScheme(newScheme(t, false)).WithObjects(target).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, cl ctrlclient.WithWatch, key ctrlclient.ObjectKey, obj ctrlclient.Object, opts ...ctrlclient.GetOption) error {
+				select {
+				case <-time.After(apiLatency): // slow, but perfectly healthy
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+				return cl.Get(ctx, key, obj, opts...)
+			},
+		}).Build()
+
+	saved := pollInterval
+	pollInterval = 50 * time.Millisecond
+	defer func() { pollInterval = saved }()
+
+	var buf strings.Builder
+	err := DeleteAndWait(t.Context(), c, target, 30*time.Millisecond, &buf)
+	if err == nil {
+		t.Fatal("want an error: the finalizer is still held")
+	}
+	if !strings.Contains(err.Error(), "NOT CLEAN") {
+		t.Errorf("a held finalizer must be diagnosed NOT CLEAN, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "could not verify") {
+		t.Errorf("the API answered every call — this is not a query-error verdict, got: %v", err)
+	}
+
+	got := nn("team-a", "team-a-x1", 0)
+	if err := c.Get(t.Context(), clientKey(target), got); err != nil {
+		t.Fatalf("object should still exist: %v", err)
+	}
+	if len(got.Finalizers) != 1 {
+		t.Error("finalizer must never be touched")
+	}
+}
+
 // TestDeleteAndWaitPassesDeleteOptions proves the UID precondition the cmd
 // layer attaches actually reaches the API call: a real apiserver rejects the
 // delete with a conflict when the UID no longer matches, which is what stops
