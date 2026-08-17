@@ -18,6 +18,7 @@ import (
 	"github.com/vitistack/vitictl/internal/decommission"
 	"github.com/vitistack/vitictl/internal/extract"
 	"github.com/vitistack/vitictl/internal/kube"
+	"github.com/vitistack/vitictl/internal/netns"
 )
 
 var (
@@ -112,8 +113,43 @@ NOT cleaned then. Pass --yes to skip the confirmation prompt.`,
 				return err
 			}
 		}
-		return runner.Run(ctx)
+		if err := runner.Run(ctx); err != nil {
+			return err
+		}
+		printNetNSAdvisory(ctx, cmd, hit)
+		return nil
 	},
+}
+
+// printNetNSAdvisory tells the operator when the deleted cluster's
+// NetworkNamespace is no longer referenced by anything. Advisory only:
+// netns deletion stays a deliberate separate act (viti nn delete), because
+// an empty team namespace may be about to receive new clusters. Best-effort
+// and time-boxed — it must never fail, or hang, a decommission that already
+// succeeded.
+func printNetNSAdvisory(ctx context.Context, cmd *cobra.Command, hit *kcHit) {
+	nnName := hit.cluster.Spec.Cluster.NetworkNamespaceName
+	if nnName == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	snap, err := netns.Load(ctx, hit.client.Ctrl, hit.cluster.Namespace)
+	if err != nil {
+		return
+	}
+	for i := range snap.NetNSs {
+		n := &snap.NetNSs[i]
+		if n.Name != nnName {
+			continue
+		}
+		if ev := netns.EvidenceFor(snap, n); len(ev.ReferencingKCs) == 0 {
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(),
+				"ℹ️  no clusters reference networknamespace %s anymore — 'viti nn delete %s' if the namespace is being retired\n",
+				nnName, nnName)
+		}
+		return
+	}
 }
 
 var kcPrecleanCmd = &cobra.Command{
