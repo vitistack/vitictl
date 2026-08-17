@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"strings"
@@ -136,6 +135,10 @@ func printNetNSAdvisory(ctx context.Context, cmd *cobra.Command, hit *kcHit) {
 	defer cancel()
 	snap, err := netns.Load(ctx, hit.client.Ctrl, hit.cluster.Namespace)
 	if err != nil {
+		// Say why the advisory is missing rather than leaving its absence to
+		// be read as "the netns is still in use".
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+			"⚠️  could not check whether networknamespace %s is still referenced: %v\n", nnName, err)
 		return
 	}
 	for i := range snap.NetNSs {
@@ -143,7 +146,10 @@ func printNetNSAdvisory(ctx context.Context, cmd *cobra.Command, hit *kcHit) {
 		if n.Name != nnName {
 			continue
 		}
-		if ev := netns.EvidenceFor(snap, n); len(ev.ReferencingKCs) == 0 {
+		// Advise only what 'viti nn delete' would actually accept: it applies
+		// the NetworkConfiguration and IPAllocation gates too, so suggesting
+		// it for a netns those still block would be advice that fails.
+		if ev := netns.EvidenceFor(snap, n); !ev.Blocked() {
 			_, _ = fmt.Fprintf(cmd.OutOrStdout(),
 				"ℹ️  no clusters reference networknamespace %s anymore — 'viti nn delete %s' if the namespace is being retired\n",
 				nnName, nnName)
@@ -273,19 +279,11 @@ func printKcDeleteSummary(cmd *cobra.Command, hit *kcHit) {
 }
 
 // confirmKcDelete requires the operator to type the cluster name back —
-// a stronger guard than yes/no for an operation of this magnitude. Reads
-// from cmd.InOrStdin so it is testable and scriptable.
+// a stronger guard than yes/no for an operation of this magnitude. The
+// implementation is shared with the networknamespace prompt
+// (confirmTypedName, cmd/networknamespace_ops.go).
 func confirmKcDelete(cmd *cobra.Command, name string) error {
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Type the cluster name to confirm decommission: ")
-	r := bufio.NewReader(cmd.InOrStdin())
-	answer, err := r.ReadString('\n')
-	if err != nil {
-		return fmt.Errorf("reading confirmation: %w", err)
-	}
-	if strings.TrimSpace(answer) != name {
-		return fmt.Errorf("aborted: confirmation did not match")
-	}
-	return nil
+	return confirmTypedName(cmd, "cluster", "decommission", name)
 }
 
 func init() {
