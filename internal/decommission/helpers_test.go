@@ -94,11 +94,6 @@ func machine(name string) *vitiv1alpha1.Machine {
 	return &vitiv1alpha1.Machine{ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: name}}
 }
 
-// netConfig returns a NetworkConfiguration in the test namespace.
-func netConfig(name string) *vitiv1alpha1.NetworkConfiguration {
-	return &vitiv1alpha1.NetworkConfiguration{ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: name}}
-}
-
 // cpvip returns a ControlPlaneVirtualSharedIP named exactly for the cluster —
 // it has no ownerReference, which is why the runner verifies it by name.
 func cpvip(name string) *vitiv1alpha1.ControlPlaneVirtualSharedIP {
