@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"text/tabwriter"
 
@@ -67,6 +69,7 @@ func listInstalledPlugins(cmd *cobra.Command) error {
 
 	builtins := builtinCommandNames()
 	aliasOf := aliasOwners(found, managed)
+	aliasesOf := aliasesByOwner(aliasOf)
 	seen := make(map[string]string)
 
 	tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
@@ -88,12 +91,12 @@ func listInstalledPlugins(cmd *cobra.Command) error {
 		}
 
 		name := p.Name
-		if s, ok := managed[p.Name]; ok && len(s.Aliases) > 0 {
-			name = fmt.Sprintf("%s (%s)", p.Name, strings.Join(s.Aliases, ", "))
+		if aliases := aliasesOf[p.Name]; len(aliases) > 0 {
+			name = fmt.Sprintf("%s (%s)", p.Name, strings.Join(aliases, ", "))
 			// viti can grow a command after an alias was installed, which is
 			// exactly when a working shortcut goes quietly dead. Re-checking
 			// on every listing is the only place that gets caught.
-			for _, a := range s.Aliases {
+			for _, a := range aliases {
 				if builtins[a] {
 					notes = append(notes,
 						fmt.Sprintf("alias %q shadowed by built-in command", a))
@@ -121,28 +124,107 @@ func listInstalledPlugins(cmd *cobra.Command) error {
 // matters, so binaries resolving to the same file are folded in too.
 func aliasOwners(found []plugin.Plugin, managed map[string]*pluginmgr.State) map[string]string {
 	out := map[string]string{}
+	recorded := make(map[string]bool, len(managed))
 	for name, s := range managed {
+		recorded[name] = true
 		for _, a := range s.Aliases {
 			out[a] = name
 		}
 	}
 
-	real := make(map[string]string, len(found))
+	// Group the discovered binaries by the file they actually resolve to.
+	// Iteration follows first-seen order rather than the map, so the result is
+	// stable across runs.
+	groups := map[string][]plugin.Plugin{}
+	var order []string
 	for _, p := range found {
 		resolved, err := filepath.EvalSymlinks(p.Path)
 		if err != nil {
 			continue
 		}
-		if owner, ok := real[resolved]; ok {
-			// Same file under two names: the first discovered keeps the row.
-			if _, known := out[p.Name]; !known && p.Name != owner {
-				out[p.Name] = owner
-			}
+		if _, seen := groups[resolved]; !seen {
+			order = append(order, resolved)
+		}
+		groups[resolved] = append(groups[resolved], p)
+	}
+
+	for _, resolved := range order {
+		members := groups[resolved]
+		if len(members) < 2 {
 			continue
 		}
-		real[resolved] = p.Name
+		owner := rowOwner(members, recorded)
+		for _, m := range members {
+			if m.Name == owner {
+				continue
+			}
+			if _, known := out[m.Name]; !known {
+				out[m.Name] = owner
+			}
+		}
 	}
 	return out
+}
+
+// aliasesByOwner inverts the alias map so each plugin can list its own
+// shortcuts.
+//
+// It is built from aliasOwners rather than from recorded state alone, so a
+// plugin installed from source — where a Makefile made the symlink and no
+// state file exists — still shows the alias it genuinely answers to. Reporting
+// only what the plugin manager happened to record would describe the bookkeeping
+// instead of the machine.
+func aliasesByOwner(aliasOf map[string]string) map[string][]string {
+	out := map[string][]string{}
+	for alias, owner := range aliasOf {
+		out[owner] = append(out[owner], alias)
+	}
+	for owner := range out {
+		sort.Strings(out[owner])
+	}
+	return out
+}
+
+// rowOwner decides which of several names for the same file keeps the listing
+// row, the rest becoming its aliases.
+//
+// Discovery is sorted by name, so "first seen" is really "alphabetically
+// first" — which picks the alias whenever it happens to sort earlier, as "t"
+// does before "talos". The plugin would then be listed under its own alias
+// with its real name hidden, and its tracked version lost with it. Ownership
+// therefore follows what the install actually is, not the order it was walked
+// in.
+func rowOwner(members []plugin.Plugin, recorded map[string]bool) string {
+	// A name the plugin manager installed owns the row outright.
+	for _, m := range members {
+		if recorded[m.Name] {
+			return m.Name
+		}
+	}
+	// Otherwise the real binary owns it and the symlinks beside it are the
+	// aliases — which is exactly how both `viti plugin install` and a source
+	// build lay a plugin out.
+	for _, m := range members {
+		if !isSymlink(m.Path) {
+			return m.Name
+		}
+	}
+	// Every name is a symlink from somewhere else: nothing distinguishes them,
+	// so fall back to discovery order, which is at least stable.
+	return members[0].Name
+}
+
+// isSymlink reports whether path is itself a symbolic link.
+//
+// Comparing the path against its EvalSymlinks result would not do: that also
+// resolves the directory components, so a real binary inside a symlinked
+// directory would look like a link.
+func isSymlink(path string) bool {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeSymlink != 0
 }
 
 func listAvailablePlugins(cmd *cobra.Command) error {

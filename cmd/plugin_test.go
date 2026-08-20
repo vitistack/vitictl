@@ -115,3 +115,88 @@ func TestAliasOwnersFoldsAnUntrackedSymlink(t *testing.T) {
 		t.Errorf("an untracked symlink was not folded: %v", got)
 	}
 }
+
+// Discovery is sorted by name, so an alias that sorts before the plugin it
+// points at arrives first — "t" before "talos". Ownership must follow the real
+// binary, not the discovery order, or the listing reports the plugin under its
+// own alias and hides its real name.
+func TestAliasOwnersPrefersTheRealBinaryOverDiscoveryOrder(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "viti-talos")
+	if err := os.WriteFile(real, []byte("x"), 0o755); err != nil { // #nosec G306 -- test binary
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "viti-t")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	// Exactly the order plugin.List() produces: "t" sorts before "talos".
+	got := aliasOwners([]plugin.Plugin{
+		{Name: "t", Path: link},
+		{Name: "talos", Path: real},
+	}, nil)
+
+	if got["t"] != "talos" {
+		t.Errorf("aliasOwners()[t] = %q, want talos", got["t"])
+	}
+	if owner, wrong := got["talos"]; wrong {
+		t.Errorf("the real binary was folded away as an alias of %q", owner)
+	}
+}
+
+// Recorded state stays authoritative even when the symlink scan would
+// disagree, so an install that declared its aliases is never second-guessed.
+func TestAliasOwnersKeepsRecordedStateAuthoritative(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "viti-talos")
+	if err := os.WriteFile(real, []byte("x"), 0o755); err != nil { // #nosec G306 -- test binary
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "viti-t")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	managed := map[string]*pluginmgr.State{
+		"talos": {Name: "talos", Aliases: []string{"t"}},
+	}
+	got := aliasOwners([]plugin.Plugin{
+		{Name: "t", Path: link},
+		{Name: "talos", Path: real},
+	}, managed)
+	if got["t"] != "talos" {
+		t.Errorf("aliasOwners()[t] = %q, want talos", got["t"])
+	}
+	if _, wrong := got["talos"]; wrong {
+		t.Error("the recorded plugin was folded away as an alias")
+	}
+}
+
+// A source build makes its alias symlink without writing plugin-manager state.
+// The listing should still report the shortcut, because the shortcut works —
+// reporting only what was recorded describes the bookkeeping, not the machine.
+func TestAliasesByOwnerCoversUntrackedSymlinks(t *testing.T) {
+	got := aliasesByOwner(map[string]string{"t": "talos", "kv": "kubevirt"})
+	if len(got["talos"]) != 1 || got["talos"][0] != "t" {
+		t.Errorf("aliasesByOwner()[talos] = %v, want [t]", got["talos"])
+	}
+	if len(got["kubevirt"]) != 1 || got["kubevirt"][0] != "kv" {
+		t.Errorf("aliasesByOwner()[kubevirt] = %v, want [kv]", got["kubevirt"])
+	}
+}
+
+// Several aliases must render in a stable order; map iteration would shuffle
+// the column between runs.
+func TestAliasesByOwnerIsSorted(t *testing.T) {
+	got := aliasesByOwner(map[string]string{"z": "p", "a": "p", "m": "p"})
+	want := []string{"a", "m", "z"}
+	if len(got["p"]) != len(want) {
+		t.Fatalf("aliasesByOwner()[p] = %v, want %v", got["p"], want)
+	}
+	for i := range want {
+		if got["p"][i] != want[i] {
+			t.Fatalf("aliasesByOwner()[p] = %v, want %v", got["p"], want)
+		}
+	}
+}
