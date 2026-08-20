@@ -175,6 +175,62 @@ viti kc etcd-backup <name> -o ./snap.bin --copy-raw
 viti kc etcd-restore <name> --from ./snap.bin [--node <addr>] [--yes] [--skip-hash-check]
 ```
 
+### Decommissioning a cluster (`kc delete`)
+
+`kc delete` decommissions a guest cluster in two phases. Phase 1 cleans up
+*inside* the guest so external systems release what they are holding —
+ArgoCD is stopped so nothing self-heals mid-teardown, ingresses, Gateways and
+LoadBalancer services are deleted so the IPAM and DNS operators release
+addresses and records, PVCs are deleted and waited on until the CSI driver has
+removed the real volumes, and the cluster is deregistered from ROR. Phase 2
+runs **only if phase 1 is verifiably clean**, and deletes the
+KubernetesCluster CR, then watches the operator tear down the VMs, network
+configuration, API VIP and node-IP allocations until they are verifiably gone.
+
+The ordering is load-bearing: the external cleanup is performed by operators
+*inside* the guest and by its CSI drivers, so it can only happen while the
+guest is still alive. Once the VMs are gone, anything phase 1 missed is
+leaked with no way left to find it.
+
+```
+# Check everything a real run needs, change nothing. Verifies the CR and its
+# machines, that the guest API is reachable via the kubeconfig in the
+# cluster's own secret, and the ROR identity and plugin. Exits non-zero if
+# any prerequisite is missing.
+viti kc delete <name> --dry-run [-n namespace] [-z zone]
+
+# The real thing (IRREVERSIBLE). Prompts for the cluster name to confirm.
+viti kc delete <name> [-n namespace] [-z zone] [--machine-timeout 15m] [--yes]
+
+# Phase 1 only: clean up the guest and deregister from ROR, leaving the
+# cluster and its VMs untouched — for when the irreversible part happens
+# later, e.g. in a change window. Re-runnable.
+viti kc preclean <name> [-n namespace] [-z zone] [--yes]
+
+# Finish a staged decommission (or delete a guest that is already gone /
+# unreachable). Skips phase 1 entirely, so external state held by the guest
+# is NOT cleaned up — IPAM addresses, DNS records and volumes are leaked.
+viti kc delete <name> --skip-preclean
+```
+
+Deriving guest access from the cluster being deleted makes a wrong-cluster
+pairing impossible: the kubeconfig comes from that CR's own secret, never from
+your current kubectl context. Every configured availability zone must be
+reachable for the target to be resolved, so a same-named cluster on an
+unreachable zone cannot go unseen; scope the command with `-z` if a zone is
+down and you are certain which one you mean.
+
+ROR deregistration is delegated to the
+[`viti-nhn` plugin](#extensions--plugins). On a cluster with the `nhn-ror`
+namespace present, a missing plugin blocks the clean verdict rather than
+silently skipping the purge; clusters without that namespace are unaffected.
+
+**Finalizer contract:** finalizers are never stripped — they *are* the
+teardown mechanism, and removing one makes the object disappear while the VM,
+volume or address it represents stays allocated. If a wait times out the run
+is reported NOT CLEAN and stops: investigate the vitistack operators on the
+management cluster rather than forcing the objects away.
+
 ### Machines (alias: `m`) — dashboard
 
 ```
