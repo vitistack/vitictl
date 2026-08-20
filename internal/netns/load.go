@@ -7,17 +7,11 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	vitiv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
+	"github.com/vitistack/vitictl/internal/kube"
 )
-
-// ipAllocationListGVK mirrors internal/decommission: the CRD is only rolled
-// out on some availability zones and is served at v1alpha2.
-var ipAllocationListGVK = schema.GroupVersionKind{
-	Group: "vitistack.io", Version: "v1alpha2", Kind: "IPAllocationList",
-}
 
 // Load snapshots one availability zone with a single List per resource type.
 // namespace == "" loads all namespaces. Any List failure is an error —
@@ -50,7 +44,7 @@ func Load(ctx context.Context, c ctrlclient.Client, namespace string) (*Snapshot
 	s.NCs = ncs.Items
 
 	ias := &unstructured.UnstructuredList{}
-	ias.SetGroupVersionKind(ipAllocationListGVK)
+	ias.SetGroupVersionKind(kube.IPAllocationListGVK)
 	err := c.List(ctx, ias, opts...)
 	switch {
 	case err == nil:

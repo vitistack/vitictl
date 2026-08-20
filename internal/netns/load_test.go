@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	vitiv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
+	"github.com/vitistack/vitictl/internal/kube"
 )
 
 // newScheme registers the typed vitistack API; withIPAlloc additionally
@@ -96,7 +97,7 @@ func TestLoadIPAllocCRDAbsent(t *testing.T) {
 		WithObjects(nn("team-a", "team-a-x1", 2100)).
 		WithInterceptorFuncs(interceptor.Funcs{
 			List: func(ctx context.Context, cl ctrlclient.WithWatch, list ctrlclient.ObjectList, opts ...ctrlclient.ListOption) error {
-				if list.GetObjectKind().GroupVersionKind() == ipAllocationListGVK {
+				if list.GetObjectKind().GroupVersionKind() == kube.IPAllocationListGVK {
 					return noMatch
 				}
 				return cl.List(ctx, list, opts...)
@@ -125,7 +126,7 @@ func TestLoadIPAllocGenericListErrorPropagates(t *testing.T) {
 		WithObjects(nn("team-a", "team-a-x1", 2100)).
 		WithInterceptorFuncs(interceptor.Funcs{
 			List: func(ctx context.Context, cl ctrlclient.WithWatch, list ctrlclient.ObjectList, opts ...ctrlclient.ListOption) error {
-				if list.GetObjectKind().GroupVersionKind() == ipAllocationListGVK {
+				if list.GetObjectKind().GroupVersionKind() == kube.IPAllocationListGVK {
 					return genericErr
 				}
 				return cl.List(ctx, list, opts...)

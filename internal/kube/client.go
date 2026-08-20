@@ -10,6 +10,7 @@ import (
 	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -26,6 +27,17 @@ var RequiredCRDs = []string{
 	"vitistacks.vitistack.io",
 	"kubernetesclusters.vitistack.io",
 	"machines.vitistack.io",
+}
+
+// IPAllocationListGVK identifies the static-ip-operator's IPAllocation list.
+//
+// Declared here, next to RequiredCRDs, because more than one package queries
+// it and the version is the kind of detail that silently drifts apart when
+// it is written down twice. It is queried unstructured on purpose: the CRD is
+// only installed where static IP allocation is enabled, so callers must treat
+// its absence as "not enabled here" rather than an error.
+var IPAllocationListGVK = schema.GroupVersionKind{
+	Group: "vitistack.io", Version: "v1alpha2", Kind: "IPAllocationList",
 }
 
 // Client bundles a controller-runtime client with its originating

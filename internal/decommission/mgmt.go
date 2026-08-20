@@ -8,17 +8,11 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	vitiv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
+	"github.com/vitistack/vitictl/internal/kube"
 )
-
-// ipAllocationListGVK is queried unstructured: the CRD is only rolled out on
-// some availability zones (static-ip-operator) and has no typed model yet.
-var ipAllocationListGVK = schema.GroupVersionKind{
-	Group: "vitistack.io", Version: "v1alpha2", Kind: "IPAllocationList",
-}
 
 // teardown deletes the KubernetesCluster CR and watches the operator-driven
 // teardown until everything is verifiably gone. Finalizers
@@ -85,7 +79,7 @@ func (r *Runner) teardown(ctx context.Context) error {
 	leaked, checked := r.remainingIPAllocations(ctx)
 	switch {
 	case !checked:
-		r.printf("  IPAllocation CRD not present on this zone (static-ip-operator not rolled out) — node-IP check skipped")
+		r.printf("  IPAllocation CRD not installed on this zone (static IP allocation not enabled here) — node-IP check skipped")
 	case len(leaked) > 0:
 		for _, name := range leaked {
 			r.failf("node-IP allocation still present (real leak): %s", name)
@@ -115,10 +109,10 @@ func (r *Runner) countClusterMachines(ctx context.Context) (int, error) {
 // checked is false when the CRD is not installed on this zone.
 func (r *Runner) remainingIPAllocations(ctx context.Context) (leaked []string, checked bool) {
 	l := &unstructured.UnstructuredList{}
-	l.SetGroupVersionKind(ipAllocationListGVK)
+	l.SetGroupVersionKind(kube.IPAllocationListGVK)
 	if err := r.mgmt.List(ctx, l, ctrlclient.InNamespace(r.namespace)); err != nil {
 		if meta.IsNoMatchError(err) {
-			return nil, false // static-ip-operator not rolled out on this zone
+			return nil, false // CRD absent: static IP allocation is not enabled on this zone
 		}
 		r.warnf("could not verify IPAllocations: %v", err)
 		return nil, false
