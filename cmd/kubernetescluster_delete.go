@@ -73,6 +73,9 @@ NOT cleaned then. Pass --yes to skip the confirmation prompt.`,
 		if err != nil {
 			return err
 		}
+		if err := requireWholeFleet(clients, zones, "cluster", name); err != nil {
+			return err
+		}
 		hit, err := findClusterAcrossAZs(ctx, clients, name, kcDeleteNamespace)
 		if err != nil {
 			return err
@@ -187,6 +190,9 @@ deregistration is delegated to the viti-nhn plugin when installed.`,
 			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "⚠️  %v\n", err)
 		})
 		if err != nil {
+			return err
+		}
+		if err := requireWholeFleet(clients, zones, "cluster", name); err != nil {
 			return err
 		}
 		hit, err := findClusterAcrossAZs(ctx, clients, name, kcPrecleanNamespace)
