@@ -188,25 +188,9 @@ latest release are skipped.`,
 			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "no installed plugins to upgrade")
 			return nil
 		}
-		idx, err := pluginmgr.FetchIndex(cmd.Context())
+		upgraded, skipped, failed, err := upgradePlugins(cmd, targets)
 		if err != nil {
-			return fmt.Errorf("fetching plugin index: %w", err)
-		}
-		var upgraded, skipped, failed int
-		for _, state := range targets {
-			if err := upgradeOne(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), idx, state); err != nil {
-				failed++
-				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "❌ %s: %v\n", state.Name, err)
-				continue
-			}
-			// upgradeOne distinguishes no-op vs upgraded via its own output;
-			// to decide the summary we re-read state and compare.
-			post, err := pluginmgr.ReadState(state.Name)
-			if err == nil && post != nil && post.Version != state.Version {
-				upgraded++
-			} else {
-				skipped++
-			}
+			return err
 		}
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(),
 			"done — upgraded: %d, up-to-date: %d, failed: %d\n", upgraded, skipped, failed)
@@ -215,6 +199,33 @@ latest release are skipped.`,
 		}
 		return nil
 	},
+}
+
+// upgradePlugins runs the upgrade loop over the given plugin states, printing
+// per-plugin progress and failures as it goes. Shared by "viti plugin
+// upgrade" and the bundled "viti upgrade --run" so there is exactly one
+// implementation of the loop.
+func upgradePlugins(cmd *cobra.Command, targets []*pluginmgr.State) (upgraded, skipped, failed int, err error) {
+	idx, err := pluginmgr.FetchIndex(cmd.Context())
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("fetching plugin index: %w", err)
+	}
+	for _, state := range targets {
+		if err := upgradeOne(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), idx, state); err != nil {
+			failed++
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "❌ %s: %v\n", state.Name, err)
+			continue
+		}
+		// upgradeOne distinguishes no-op vs upgraded via its own output;
+		// to decide the summary we re-read state and compare.
+		post, err := pluginmgr.ReadState(state.Name)
+		if err == nil && post != nil && post.Version != state.Version {
+			upgraded++
+		} else {
+			skipped++
+		}
+	}
+	return upgraded, skipped, failed, nil
 }
 
 var pluginUninstallCmd = &cobra.Command{

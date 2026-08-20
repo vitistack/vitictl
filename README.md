@@ -345,6 +345,12 @@ viti plugin uninstall <name>
 
 Binaries land next to `viti` itself unless `--prefix` says otherwise.
 
+`viti upgrade` checks viti **and** every installed plugin in one pass, and
+`viti upgrade --run` upgrades them all behind a single confirmation — the
+plugins through the same verified path as `viti plugin upgrade`. Pass
+`--no-plugins` for viti alone. Plugins installed by hand (no state file in
+`~/.vitistack/plugins`) are outside its reach, as with `viti plugin upgrade`.
+
 ### Plugin aliases
 
 An index entry may declare short aliases, installed as links beside the binary:
