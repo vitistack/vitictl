@@ -2,8 +2,11 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -58,9 +61,9 @@ func buildResourceCmd[T ctrlclient.Object, TList ctrlclient.ObjectList](b resour
 		Use:   "list",
 		Short: "List " + b.Use + " across all configured availability zones",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCollect(cmd, listOut, listNS, listSort, b, comparators, func(hits []azItem[T], format printer.Format) error {
+			return runCollect(cmd, listOut, listNS, listSort, b, comparators, func(hits []azItem[T], format printer.Format, partial bool) error {
 				if len(hits) == 0 && !format.IsStructured() {
-					fmt.Println("🤷 no " + b.Use + " found")
+					fmt.Println("🤷 no " + b.Use + " found" + incompleteSuffix(partial))
 					return nil
 				}
 				return renderResource(cmd, hits, format, b)
@@ -79,7 +82,7 @@ func buildResourceCmd[T ctrlclient.Object, TList ctrlclient.ObjectList](b resour
 		Short: "Show a " + b.Use + " by name (searches all availability zones unless --az)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCollect(cmd, getOut, getNS, "", b, comparators, func(all []azItem[T], format printer.Format) error {
+			return runCollect(cmd, getOut, getNS, "", b, comparators, func(all []azItem[T], format printer.Format, partial bool) error {
 				var hits []azItem[T]
 				for _, h := range all {
 					if h.obj.GetName() == args[0] {
@@ -87,6 +90,9 @@ func buildResourceCmd[T ctrlclient.Object, TList ctrlclient.ObjectList](b resour
 					}
 				}
 				if len(hits) == 0 {
+					if partial {
+						return fmt.Errorf("❌ no %s named %q found — but not every availability zone could be searched (warnings above), so it may exist on one that did not answer", b.Use, args[0])
+					}
 					return fmt.Errorf("❌ no %s named %q found on any availability zone", b.Use, args[0])
 				}
 				return renderResource(cmd, hits, format, b)
@@ -104,7 +110,7 @@ func buildResourceCmd[T ctrlclient.Object, TList ctrlclient.ObjectList](b resour
 		Short: "Fuzzy-search " + b.Use + " across all configured availability zones",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCollect(cmd, searchOut, searchNS, "", b, comparators, func(all []azItem[T], format printer.Format) error {
+			return runCollect(cmd, searchOut, searchNS, "", b, comparators, func(all []azItem[T], format printer.Format, partial bool) error {
 				query := ""
 				if len(args) == 1 {
 					query = args[0]
@@ -126,7 +132,7 @@ func buildResourceCmd[T ctrlclient.Object, TList ctrlclient.ObjectList](b resour
 					return err
 				}
 				if len(hits) == 0 && !format.IsStructured() {
-					fmt.Println("🤷 no " + b.Use + " matched")
+					fmt.Println("🤷 no " + b.Use + " matched" + incompleteSuffix(partial))
 					return nil
 				}
 				return renderResource(cmd, hits, format, b)
@@ -185,7 +191,7 @@ func runCollect[T ctrlclient.Object, TList ctrlclient.ObjectList](
 	outFlag, nsFlag, sortFlag string,
 	b resourceBinding[T, TList],
 	comparators map[string]func(a, b azItem[T]) int,
-	act func(hits []azItem[T], format printer.Format) error,
+	act func(hits []azItem[T], format printer.Format, partial bool) error,
 ) error {
 	format, err := printer.Parse(outFlag)
 	if err != nil {
@@ -200,35 +206,76 @@ func runCollect[T ctrlclient.Object, TList ctrlclient.ObjectList](
 	if err != nil {
 		return err
 	}
-	hits := collectResource(ctx, clients, nsFlag, b)
+	hits, partial := collectResource(ctx, clients, nsFlag, b)
+	// A zone dropped at connect time was never searched either.
+	partial = partial || len(clients) != len(zones)
 	if err := sortByKeys(hits, sortFlag, comparators); err != nil {
 		return err
 	}
-	return act(hits, format)
+	return act(hits, format, partial)
 }
 
+// listZoneTimeout bounds one availability zone's List. Without it a single
+// unhealthy zone hangs the command forever with no output: a cluster whose CRD
+// conversion webhook cannot be verified leaves the apiserver waiting, and
+// client-go has no deadline of its own. A zone that exceeds this is reported
+// and skipped so the reachable zones still produce a result.
+var listZoneTimeout = 30 * time.Second
+
+// collectResource lists the bound resource on every zone, concurrently, and
+// reports whether any zone failed to answer. Callers must surface `partial`:
+// results gathered from a subset of the fleet must never read as the whole of
+// it, which is exactly how "not found on any availability zone" becomes a lie.
 func collectResource[T ctrlclient.Object, TList ctrlclient.ObjectList](
 	ctx context.Context,
 	clients []*kube.Client,
 	namespace string,
 	b resourceBinding[T, TList],
-) []azItem[T] {
-	var out []azItem[T]
-	for _, c := range clients {
-		list := b.NewList()
-		opts := []ctrlclient.ListOption{}
-		if b.Namespaced && namespace != "" {
-			opts = append(opts, ctrlclient.InNamespace(namespace))
-		}
-		if err := c.Ctrl.List(ctx, list, opts...); err != nil {
-			warn(fmt.Errorf("availability zone %q: listing %s: %w", c.AZ.Name, b.Use, err))
+) (out []azItem[T], partial bool) {
+	type zoneResult struct {
+		items []T
+		err   error
+	}
+	results := make([]zoneResult, len(clients))
+
+	var wg sync.WaitGroup
+	for i, c := range clients {
+		wg.Add(1)
+		go func(i int, c *kube.Client) {
+			defer wg.Done()
+			zctx, cancel := context.WithTimeout(ctx, listZoneTimeout)
+			defer cancel()
+
+			list := b.NewList()
+			opts := []ctrlclient.ListOption{}
+			if b.Namespaced && namespace != "" {
+				opts = append(opts, ctrlclient.InNamespace(namespace))
+			}
+			if err := c.Ctrl.List(zctx, list, opts...); err != nil {
+				if errors.Is(zctx.Err(), context.DeadlineExceeded) {
+					err = fmt.Errorf("timed out after %s — the zone's API did not answer; "+
+						"check the CRD conversion webhook on this cluster: %w", listZoneTimeout, err)
+				}
+				results[i] = zoneResult{err: err}
+				return
+			}
+			results[i] = zoneResult{items: b.Items(list)}
+		}(i, c)
+	}
+	wg.Wait()
+
+	// Consumed in client order so output stays deterministic.
+	for i, res := range results {
+		if res.err != nil {
+			partial = true
+			warn(fmt.Errorf("availability zone %q: listing %s: %w", clients[i].AZ.Name, b.Use, res.err))
 			continue
 		}
-		for _, it := range b.Items(list) {
-			out = append(out, azItem[T]{azName: c.AZ.Name, obj: it})
+		for _, it := range res.items {
+			out = append(out, azItem[T]{azName: clients[i].AZ.Name, obj: it})
 		}
 	}
-	return out
+	return out, partial
 }
 
 func renderResource[T ctrlclient.Object, TList ctrlclient.ObjectList](
@@ -285,4 +332,13 @@ func itemsOf[T any](items []T) []*T {
 		out[i] = &items[i]
 	}
 	return out
+}
+
+// incompleteSuffix qualifies an empty result when part of the fleet could not
+// be searched, so "nothing found" is not mistaken for "nothing exists".
+func incompleteSuffix(partial bool) string {
+	if partial {
+		return " (incomplete: some availability zones could not be searched — see warnings above)"
+	}
+	return ""
 }
