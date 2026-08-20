@@ -22,9 +22,10 @@
 #
 # Before adding one, check it against `viti --help`, including each command's
 # aliases. Currently taken: c, cls, cpvip, eb, kc, kp, kvc, lb, m, mc, mp, nc,
-# nn, pxc, vs, plus every full command name. Prefer aliases that shorten a
-# genuinely long name; a two-letter alias for a three-letter plugin buys
-# little and spends the namespace.
+# nn, pxc, vs, plus every full command name — and the plugin aliases claimed
+# below: kv, t. Prefer aliases that shorten a genuinely long name; a
+# two-letter alias for a three-letter plugin buys little and spends the
+# namespace.
 #
 # Optional overrides (defaults cover the canonical "viti-<name> in its own
 # repo" layout):
@@ -63,6 +64,21 @@ plugins:
     repo: vitistack/vitictl-kubevirt
     description: List and control KubeVirt virtual machines
     aliases: [kv]
+
+  - name: talos
+    repo: vitistack/vitictl-talos
+    description: Inspect, patch and upgrade Talos clusters across the fleet
+    # A single letter is the expensive kind of alias — it is also the likeliest
+    # name a future built-in claims — but it earns it here. Fleet work means
+    # typing this over and over with several flags after it, and the
+    # fleet-wide `patch` is driven interactively rather than from a script.
+    #
+    # If a viti release ever claims "t" for a built-in, the built-in wins and
+    # this alias simply stops firing: `viti plugin install` refuses a
+    # colliding alias and `viti plugin list` re-checks existing ones, so the
+    # clash surfaces as a message rather than as a command that quietly does
+    # the wrong thing. `viti talos` keeps working either way.
+    aliases: [t]
 
   - name: nhn
     repo: vitistack/vitictl-nhn
