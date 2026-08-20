@@ -74,9 +74,11 @@ func DeleteAndWait(ctx context.Context, c ctrlclient.Client, nn *vitiv1alpha1.Ne
 		case err != nil:
 			return fmt.Errorf("deleting networknamespace %s/%s: %w", nn.Namespace, nn.Name, err)
 		}
-		_, _ = fmt.Fprintf(out, "🗑️  delete issued — waiting for the operator to release the finalizer (external NAM teardown: VLAN %d, prefixes)\n", nn.Status.VlanID)
+		_, _ = fmt.Fprintf(out, "🗑️  %s/%s: delete issued — waiting for the operator to release the finalizer (external NAM teardown: VLAN %d, prefixes)\n",
+			nn.Namespace, nn.Name, nn.Status.VlanID)
 	} else {
-		_, _ = fmt.Fprintf(out, "⏳ already Terminating (deletionTimestamp set) — waiting for finalizer release, not re-deleting\n")
+		_, _ = fmt.Fprintf(out, "⏳ %s/%s: already Terminating (deletionTimestamp set) — waiting for finalizer release, not re-deleting\n",
+			nn.Namespace, nn.Name)
 	}
 
 	var lastErr error
@@ -100,7 +102,12 @@ func DeleteAndWait(ctx context.Context, c ctrlclient.Client, nn *vitiv1alpha1.Ne
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			// Keep the operator-facing framing even when the caller's context
+			// ends the wait: the delete was already issued, so the finalizer is
+			// the thing to reason about — not the interruption.
+			return fmt.Errorf("stopped waiting for %s/%s before the operator released the finalizer, "+
+				"so external NAM state (VLAN %d, prefixes) may still be tearing down. Re-run to verify; "+
+				"do NOT strip the finalizer: %w", nn.Namespace, nn.Name, nn.Status.VlanID, ctx.Err())
 		case <-time.After(pollInterval):
 		}
 	}

@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"sync"
 	"text/tabwriter"
@@ -23,6 +22,7 @@ import (
 var (
 	nnOrphansNamespace   string
 	nnOrphansZoneTimeout time.Duration
+	nnOrphansOutput      string
 )
 
 // zoneWarn reports a non-fatal problem through the command's own stderr
@@ -132,6 +132,10 @@ automation cannot mistake partial coverage for a clean fleet.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := context.Background()
+		format, err := printer.Parse(nnOrphansOutput)
+		if err != nil {
+			return err
+		}
 		zones, err := kube.ResolveAvailabilityZones(AvailabilityZone())
 		if err != nil {
 			return err
@@ -145,7 +149,7 @@ automation cannot mistake partial coverage for a clean fleet.`,
 			return err
 		}
 
-		var rows []string
+		var found []orphanReport
 		total, audited := 0, 0
 		for i, res := range loadAllZones(ctx, clients, nnOrphansNamespace, nnOrphansZoneTimeout) {
 			c := clients[i]
@@ -156,20 +160,48 @@ automation cannot mistake partial coverage for a clean fleet.`,
 			audited++
 			for _, o := range netns.Orphans(res.snap) {
 				total++
-				rows = append(rows, fmt.Sprintf("%s\t%s\t%s\t%d\t%s\t%s\t%s\t%d\t%s\t%d",
-					c.AZ.Name, o.NN.Namespace, o.NN.Name,
-					o.NN.Status.VlanID, valueOrDash(o.NN.Status.IPv4Prefix), o.NN.Status.Phase,
-					printer.Age(o.NN.CreationTimestamp),
-					len(o.Ev.NCRefs), ipAllocCell(o.Ev), len(o.Ev.GhostAssocIDs)))
+				found = append(found, newOrphanReport(c.AZ.Name, o))
 			}
 		}
 
+		// Structured output is the whole payload: no table, no summary prose —
+		// callers piping this want the records, and the coverage numbers travel
+		// with them so a partial audit stays detectable after the pipe.
+		if format.IsStructured() {
+			report := orphanAudit{Orphans: found, ZonesAudited: audited, ZonesConfigured: len(zones)}
+			if report.Orphans == nil {
+				report.Orphans = []orphanReport{}
+			}
+			if err := writeOrphanAudit(cmd.OutOrStdout(), format, report); err != nil {
+				return err
+			}
+			if audited < len(zones) {
+				_, warning := auditSummary(total, audited, len(zones))
+				return errors.New(warning)
+			}
+			return nil
+		}
+
+		if format == printer.FormatName {
+			for _, o := range found {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "networknamespace/%s/%s\n", o.Namespace, o.Name)
+			}
+			if audited < len(zones) {
+				_, warning := auditSummary(total, audited, len(zones))
+				return errors.New(warning)
+			}
+			return nil
+		}
+
 		// House style (cmd/resource_builder.go): no header without rows.
-		if len(rows) > 0 {
+		if len(found) > 0 {
 			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
 			_, _ = fmt.Fprintln(tw, "AZ\tNAMESPACE\tNAME\tVLAN\tIPV4 PREFIX\tPHASE\tAGE\tNC-REFS\tIPALLOCS\tGHOST-ASSOC")
-			for _, r := range rows {
-				_, _ = fmt.Fprintln(tw, r)
+			for _, o := range found {
+				_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\t%s\t%d\t%s\t%d\n",
+					o.AvailabilityZone, o.Namespace, o.Name, o.VlanID,
+					valueOrDash(o.IPv4Prefix), o.Phase, o.Age,
+					len(o.NCRefs), o.ipAllocCell, len(o.GhostAssocIDs))
 			}
 			if err := tw.Flush(); err != nil {
 				return err
@@ -187,20 +219,6 @@ automation cannot mistake partial coverage for a clean fleet.`,
 		}
 		return nil
 	},
-}
-
-// ipAllocCell renders the IPALLOCS column: "n/a" where the CRD is absent,
-// otherwise the count, with "+N?" appended for records whose target could not
-// be determined.
-func ipAllocCell(ev netns.Evidence) string {
-	cell := "n/a"
-	if ev.IPAllocCount >= 0 {
-		cell = strconv.Itoa(ev.IPAllocCount)
-	}
-	if n := len(ev.IPAllocUnevaluated); n > 0 {
-		cell += fmt.Sprintf("+%d?", n)
-	}
-	return cell
 }
 
 var (
@@ -336,14 +354,8 @@ networknamespace operator on the management cluster.`,
 		if err != nil {
 			return err
 		}
-		// Unlike the audit, a destructive resolve tolerates no missing zone:
-		// ConnectAll drops unreachable ones with a warning, and a netns of the
-		// same name sitting on a dropped zone would never be seen as the
-		// ambiguity it is.
-		if len(clients) != len(zones) {
-			return fmt.Errorf("refusing to delete %q: %d of %d configured availability zone(s) could not be connected (warnings above), "+
-				"so a same-named networknamespace there could not be ruled out — fix the connection, or narrow the search with -z",
-				name, len(zones)-len(clients), len(zones))
+		if err := requireWholeFleet(clients, zones, "networknamespace", name); err != nil {
+			return err
 		}
 
 		hit, err := findNetNSAcrossAZs(ctx, clients, name, nnDeleteNamespace, nnDeleteZoneTimeout)
@@ -461,6 +473,7 @@ func recheckGates(ctx context.Context, cmd *cobra.Command, hit *nnHit) (*vitiv1a
 
 func init() {
 	nnOrphansCmd.Flags().StringVarP(&nnOrphansNamespace, "namespace", "n", "", "limit the audit to this namespace")
+	nnOrphansCmd.Flags().StringVarP(&nnOrphansOutput, "output", "o", "", outputFlagHelp)
 	nnOrphansCmd.Flags().DurationVar(&nnOrphansZoneTimeout, "zone-timeout", 30*time.Second,
 		"per-availability-zone query budget; a zone that exceeds it is reported and skipped")
 
