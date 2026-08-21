@@ -112,15 +112,26 @@ func auditSummary(orphans, audited, configured int) (line, warning string) {
 
 var nnOrphansCmd = &cobra.Command{
 	Use:   "orphans",
-	Short: "List NetworkNamespaces no KubernetesCluster references (housekeeping audit)",
-	Long: `Lists every NetworkNamespace with zero referencing KubernetesClusters
-(spec.data.networkNamespaceName), across all configured availability zones.
+	Short: "List NetworkNamespaces nothing uses (housekeeping audit)",
+	Long: `Lists every NetworkNamespace that nothing claims, across all configured
+availability zones. A netns is claimed — and so not listed — when any of these
+holds in its namespace:
 
-Columns preview the 'viti nn delete' gates:
-  NC-REFS      NetworkConfigurations still bound to the netns (by name or vlan)
-  IPALLOCS     IPAllocations still referencing it (n/a where the CRD is absent);
+  • a KubernetesCluster names it (spec.data.networkNamespaceName)
+  • a NetworkConfiguration is bound to it, by name or by vlan<id> interface
+  • an IPAllocation references it (where that CRD exists)
+
+The NetworkConfiguration rule matters more than it looks: clusters created
+before ~2026-06-02 predate the operator writing networkNamespaceName, so they
+name no netns at all. Selecting on the KubernetesCluster reference alone
+listed those live clusters' netns as orphans; their machines' vlan interfaces
+are what proves the VLAN is still carrying traffic.
+
+Columns:
+  IPALLOCS     IPAllocations referencing it (n/a where the CRD is absent);
                a trailing "+N?" counts records whose spec.networkNamespaceName
-               could not be read — unknown, so delete refuses on them
+               could not be read — unknown is not absence, so delete refuses
+               on them and the netns is listed but NOT deletable
   GHOST-ASSOC  stale status association ids with no live cluster — a known
                cosmetic operator bug, shown for visibility, never trusted
 
@@ -196,12 +207,15 @@ automation cannot mistake partial coverage for a clean fleet.`,
 		// House style (cmd/resource_builder.go): no header without rows.
 		if len(found) > 0 {
 			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-			_, _ = fmt.Fprintln(tw, "AZ\tNAMESPACE\tNAME\tVLAN\tIPV4 PREFIX\tPHASE\tAGE\tNC-REFS\tIPALLOCS\tGHOST-ASSOC")
+			// No NC-REFS column: a NetworkConfiguration bound to the netns now
+			// disqualifies it from the list entirely, so the count is zero for
+			// every row printed here and the column carried no information.
+			_, _ = fmt.Fprintln(tw, "AZ\tNAMESPACE\tNAME\tVLAN\tIPV4 PREFIX\tPHASE\tAGE\tIPALLOCS\tGHOST-ASSOC")
 			for _, o := range found {
-				_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\t%s\t%d\t%s\t%d\n",
+				_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%d\n",
 					o.AvailabilityZone, o.Namespace, o.Name, o.VlanID,
 					valueOrDash(o.IPv4Prefix), o.Phase, o.Age,
-					len(o.NCRefs), o.ipAllocCell, len(o.GhostAssocIDs))
+					o.ipAllocCell, len(o.GhostAssocIDs))
 			}
 			if err := tw.Flush(); err != nil {
 				return err
