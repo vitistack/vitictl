@@ -38,7 +38,20 @@ type Snapshot struct {
 type Evidence struct {
 	ReferencingKCs []string // KCs in the same namespace with spec.data.networkNamespaceName == name → HARD GATE
 	NCRefs         []string // NCs in the same namespace referencing by name or by vlan<id> interface → HARD GATE
-	IPAllocCount   int      // ipallocations referencing this netns; -1 = CRD absent on this zone
+	// NCUnevaluated names NCs in the netns' namespace whose binding could not
+	// be determined: they declare no spec.networkNamespaceName, and they
+	// cannot be ruled out by interface either — the netns' status.vlanId is
+	// unset so the vlan<id> rule cannot run, or the NC declares no interfaces
+	// at all. UNKNOWN is not "not this netns", so this is a HARD GATE, the
+	// same fail-closed reasoning as IPAllocUnevaluated below.
+	//
+	// This gate exists because the vlan rule is the ONLY one that covers
+	// objects predating ~2026-06-02, when the operator began writing
+	// networkNamespaceName (see Orphans). For those, losing the vlan leaves no
+	// evidence of use at all: a netns whose status was wiped while its
+	// machines kept running would otherwise read as free to delete.
+	NCUnevaluated []string
+	IPAllocCount  int // ipallocations referencing this netns; -1 = CRD absent on this zone
 	// IPAllocUnevaluated names ipallocations in the netns' namespace whose
 	// spec.networkNamespaceName could not be read (absent field, or not a
 	// string). Their target is UNKNOWN, which is not the same as "not this
@@ -53,22 +66,29 @@ type Evidence struct {
 // KubernetesCluster naming it, a NetworkConfiguration bound to it (by name or
 // by vlan<id> interface), or a live IPAllocation pointing at it.
 //
-// Unevaluated ipallocations are deliberately NOT in use. Unknown is not a
-// claim, and it is not absence either — which is why it blocks deletion
-// (below) while still leaving the netns worth reporting.
+// Unevaluated records — NCs or ipallocations — are deliberately NOT in use.
+// Unknown is not a claim, and it is not absence either, which is why they
+// block deletion (below) while still leaving the netns worth reporting.
 func (e *Evidence) InUse() bool {
 	return len(e.ReferencingKCs) > 0 || len(e.NCRefs) > 0 || e.IPAllocCount > 0
 }
 
-// Blocked reports whether any hard gate refuses deletion. Unevaluated
-// ipallocations block on purpose (fail-closed): the alternative is deleting
-// external NAM state while records that may point at it are unaccounted for.
+// Unresolved reports whether any evidence could not be read at all. It is not
+// a claim and not an absence, so it never makes a netns in-use — but it must
+// refuse deletion: the alternative is tearing down external NAM state while
+// records that may point at it are unaccounted for.
+func (e *Evidence) Unresolved() bool {
+	return len(e.NCUnevaluated) > 0 || len(e.IPAllocUnevaluated) > 0
+}
+
+// Blocked reports whether any hard gate refuses deletion: something claims the
+// netns, or something about it could not be determined.
 //
-// This is InUse plus that fail-closed case, which is exactly the set of gates
-// it has always been — the split exists so the audit can distinguish "in use"
-// from "not deletable", not to change what delete refuses.
+// The split exists so the audit can distinguish "in use" (not an orphan at
+// all) from "not deletable" (an orphan whose evidence is unreadable), not to
+// change what delete refuses.
 func (e *Evidence) Blocked() bool {
-	return e.InUse() || len(e.IPAllocUnevaluated) > 0
+	return e.InUse() || e.Unresolved()
 }
 
 func vlanInterfaceName(vlan int) string { return fmt.Sprintf("vlan%d", vlan) }
@@ -105,9 +125,21 @@ func EvidenceFor(s *Snapshot, nn *vitiv1alpha1.NetworkNamespace) Evidence {
 				}
 			}
 		}
-		if byName || byVlan {
+		switch {
+		case byName || byVlan:
 			ev.NCRefs = append(ev.NCRefs, c.Name)
+		case c.Spec.NetworkNamespaceName != "":
+			// Names a DIFFERENT netns: definitively not this one. The only
+			// case here that is genuinely settled by the absence of a match.
+		case !ev.VlanKnown || len(c.Spec.NetworkInterfaces) == 0:
+			// Declares no netns, and there is nothing left to rule it out
+			// with — no vlan to match against, or no interfaces to match.
+			// Unknown, not absent.
+			ev.NCUnevaluated = append(ev.NCUnevaluated, c.Name)
 		}
+		// Remaining case: declares no netns, but has interfaces and the vlan
+		// is known — the interfaces name some other vlan, so it is bound
+		// elsewhere. Settled, and not a reference.
 	}
 
 	if s.IPAllocCRDPresent {

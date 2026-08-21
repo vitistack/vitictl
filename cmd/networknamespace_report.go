@@ -31,8 +31,9 @@ type orphanReport struct {
 	// No NetworkConfiguration refs: a bound NetworkConfiguration disqualifies
 	// the netns from being an orphan at all (netns.Orphans), so the field
 	// could only ever be empty. Carrying it would invite a future reader to
-	// "fix" the renderer to display a value that cannot exist.
-	//
+	// "fix" the renderer to display a value that cannot exist. NCs whose
+	// binding is UNKNOWN are a different matter and are reported below.
+	NCUnevaluated []string `json:"networkConfigurationsUnevaluated,omitempty"`
 	// IPAllocCount is -1 when the IPAllocation CRD is not installed on the
 	// zone, which is not the same as zero and must stay distinguishable.
 	IPAllocCount       int      `json:"ipAllocationCount"`
@@ -69,6 +70,7 @@ func newOrphanReport(azName string, o netns.Orphan) orphanReport {
 		IPv4Prefix:         o.NN.Status.IPv4Prefix,
 		IPv6Prefix:         o.NN.Status.IPv6Prefix,
 		IPv4EgressIP:       o.NN.Status.IPv4EgressIP,
+		NCUnevaluated:      ev.NCUnevaluated,
 		IPAllocCount:       ev.IPAllocCount,
 		IPAllocUnevaluated: ev.IPAllocUnevaluated,
 		GhostAssocIDs:      ev.GhostAssocIDs,

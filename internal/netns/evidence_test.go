@@ -40,6 +40,12 @@ func ncByVlan(ns, name string, vlan int) vitiv1alpha1.NetworkConfiguration {
 	return c
 }
 
+// ncBare declares neither a netns name nor any interface: nothing to rule it
+// in or out with.
+func ncBare(ns, name string) vitiv1alpha1.NetworkConfiguration {
+	return vitiv1alpha1.NetworkConfiguration{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}}
+}
+
 func ipalloc(ns, name, netnsName string) unstructured.Unstructured {
 	u := unstructured.Unstructured{Object: map[string]any{
 		"spec": map[string]any{"networkNamespaceName": netnsName},
@@ -93,6 +99,16 @@ func TestEvidenceVlanUnknownSkipsVlanMatching(t *testing.T) {
 	}
 	if len(ev.NCRefs) != 0 {
 		t.Fatalf("NCRefs = %v, want none when vlan is unknown", ev.NCRefs)
+	}
+	// Not matching is not the same as being ruled out: with no vlan to compare
+	// against and no networkNamespaceName declared, this NC's binding is
+	// unknown, so it lands in the fail-closed bucket rather than being
+	// silently treated as unrelated.
+	if len(ev.NCUnevaluated) != 1 || ev.NCUnevaluated[0] != "m1-nc" {
+		t.Errorf("NCUnevaluated = %v, want [m1-nc]", ev.NCUnevaluated)
+	}
+	if !ev.Blocked() {
+		t.Error("an unevaluable NetworkConfiguration must block deletion")
 	}
 }
 
@@ -247,35 +263,120 @@ func TestOrphansStillListsUnreadableIPAllocations(t *testing.T) {
 	}
 }
 
-func TestBlockedIsUnchangedByTheInUseSplit(t *testing.T) {
-	// Blocked() must keep meaning exactly what it meant before InUse was
-	// factored out of it: nn delete's two gates and the kc delete advisory
-	// all key on it, and this change was never meant to move them.
+func TestBlockedAndInUseDivergeOnlyOnUnresolvedEvidence(t *testing.T) {
+	// nn delete's two gates and the kc delete advisory all key on Blocked, so
+	// the exact relationship between the two predicates is load-bearing:
+	// Blocked = InUse || Unresolved, and nothing else moves either one.
 	cases := []struct {
-		name string
-		ev   Evidence
-		want bool
+		name      string
+		ev        Evidence
+		wantBlock bool
+		wantInUse bool
 	}{
-		{"nothing", Evidence{IPAllocCount: -1}, false},
-		{"kc ref", Evidence{IPAllocCount: -1, ReferencingKCs: []string{"c1"}}, true},
-		{"nc ref", Evidence{IPAllocCount: -1, NCRefs: []string{"nc1"}}, true},
-		{"live ipalloc", Evidence{IPAllocCount: 1}, true},
-		{"zero ipallocs", Evidence{IPAllocCount: 0}, false},
-		{"unevaluated only", Evidence{IPAllocCount: 0, IPAllocUnevaluated: []string{"a1"}}, true},
-		{"ghosts only", Evidence{IPAllocCount: -1, GhostAssocIDs: []string{"dead"}}, false},
+		{"nothing", Evidence{IPAllocCount: -1}, false, false},
+		{"kc ref", Evidence{IPAllocCount: -1, ReferencingKCs: []string{"c1"}}, true, true},
+		{"nc ref", Evidence{IPAllocCount: -1, NCRefs: []string{"nc1"}}, true, true},
+		{"live ipalloc", Evidence{IPAllocCount: 1}, true, true},
+		{"zero ipallocs", Evidence{IPAllocCount: 0}, false, false},
+		// Unresolved: blocks without being a claim.
+		{"unreadable ipalloc", Evidence{IPAllocCount: 0, IPAllocUnevaluated: []string{"a1"}}, true, false},
+		{"unevaluable nc", Evidence{IPAllocCount: -1, NCUnevaluated: []string{"nc1"}}, true, false},
+		// Never gates anything.
+		{"ghosts only", Evidence{IPAllocCount: -1, GhostAssocIDs: []string{"dead"}}, false, false},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
 			ev := tt.ev
-			if got := ev.Blocked(); got != tt.want {
-				t.Errorf("Blocked() = %v, want %v", got, tt.want)
+			if got := ev.Blocked(); got != tt.wantBlock {
+				t.Errorf("Blocked() = %v, want %v", got, tt.wantBlock)
 			}
-			// The one legitimate divergence: unevaluated records block
-			// without being a claim.
-			wantInUse := tt.want && len(tt.ev.IPAllocUnevaluated) == 0
-			if got := ev.InUse(); got != wantInUse {
-				t.Errorf("InUse() = %v, want %v", got, wantInUse)
+			if got := ev.InUse(); got != tt.wantInUse {
+				t.Errorf("InUse() = %v, want %v", got, tt.wantInUse)
+			}
+			if got := ev.Blocked(); got != (ev.InUse() || ev.Unresolved()) {
+				t.Errorf("Blocked() = %v but InUse||Unresolved = %v — the gates have drifted apart",
+					got, ev.InUse() || ev.Unresolved())
 			}
 		})
+	}
+}
+
+func TestEvidenceNCUnevaluableWhenVlanUnknown(t *testing.T) {
+	// The hole this closes. A netns with no status.vlanId cannot use the
+	// vlan<id> rule, and a pre-2026-06-02 NetworkConfiguration declares no
+	// networkNamespaceName either — so there is nothing left to rule it out
+	// with. Before this, that read as "not a reference", which is how an
+	// in-use netns whose status was lost would have become deletable.
+	target := nn("vitistack-atlas", "vitistack-atlas", 0) // vlan unknown
+	s := &Snapshot{
+		NetNSs: []vitiv1alpha1.NetworkNamespace{*target},
+		NCs: []vitiv1alpha1.NetworkConfiguration{
+			ncByVlan("vitistack-atlas", "d-trd-atlas-001-xdf2-ctp0", 2470),
+		},
+	}
+	ev := EvidenceFor(s, target)
+	if ev.VlanKnown {
+		t.Fatal("fixture is wrong: vlan must be unknown for this case")
+	}
+	if len(ev.NCUnevaluated) != 1 || ev.NCUnevaluated[0] != "d-trd-atlas-001-xdf2-ctp0" {
+		t.Fatalf("NCUnevaluated = %v, want the one NC whose binding cannot be determined", ev.NCUnevaluated)
+	}
+	if ev.InUse() {
+		t.Error("unknown is not a claim — InUse must stay false")
+	}
+	if !ev.Blocked() {
+		t.Error("unknown is not absence either — deletion must be refused (fail-closed)")
+	}
+	// Symmetric with unreadable ipallocations: still reported, so the anomaly
+	// reaches a human instead of being swept up as clean.
+	if got := Orphans(s); len(got) != 1 {
+		t.Fatalf("Orphans = %d, want 1: an unresolvable netns must still be listed", len(got))
+	}
+}
+
+func TestEvidenceNCUnevaluableWithNoInterfaces(t *testing.T) {
+	// Same hole, reached without losing the vlan: an NC that declares neither
+	// a netns name nor any interface cannot be ruled out either. No such
+	// object existed in the fleet when this was written (all 775 NCs had at
+	// least one interface), but it is the same class and costs nothing.
+	target := nn("team-a", "team-a-x1", 2100)
+	s := &Snapshot{
+		NetNSs: []vitiv1alpha1.NetworkNamespace{*target},
+		NCs:    []vitiv1alpha1.NetworkConfiguration{ncBare("team-a", "nc-bare")},
+	}
+	ev := EvidenceFor(s, target)
+	if len(ev.NCUnevaluated) != 1 {
+		t.Fatalf("NCUnevaluated = %v, want [nc-bare]", ev.NCUnevaluated)
+	}
+	if !ev.Blocked() || ev.InUse() {
+		t.Errorf("want blocked-but-not-in-use, got Blocked=%v InUse=%v", ev.Blocked(), ev.InUse())
+	}
+}
+
+func TestEvidenceNCsThatCanBeRuledOutAreNotUnevaluable(t *testing.T) {
+	// The fail-closed gate must not swallow the cases that ARE settled, or
+	// every netns in a busy namespace becomes permanently undeletable.
+	target := nn("team-a", "team-a-x1", 2100)
+	s := &Snapshot{
+		NetNSs: []vitiv1alpha1.NetworkNamespace{*target},
+		NCs: []vitiv1alpha1.NetworkConfiguration{
+			// Names a different netns: settled, not ours.
+			ncByName("team-a", "nc-other-netns", "team-a-SOMETHING-ELSE"),
+			// Has interfaces, but on another vlan, and our vlan is known:
+			// settled, bound elsewhere.
+			ncByVlan("team-a", "nc-other-vlan", 2999),
+			// Wrong namespace entirely.
+			ncBare("team-b", "nc-elsewhere"),
+		},
+	}
+	ev := EvidenceFor(s, target)
+	if len(ev.NCUnevaluated) != 0 {
+		t.Fatalf("NCUnevaluated = %v, want none: every one of these can be ruled out", ev.NCUnevaluated)
+	}
+	if len(ev.NCRefs) != 0 {
+		t.Fatalf("NCRefs = %v, want none", ev.NCRefs)
+	}
+	if ev.Blocked() {
+		t.Error("nothing here claims or obscures the netns — it must be deletable")
 	}
 }

@@ -90,10 +90,11 @@ func TestConfirmTypedNameKeepsBothPrompts(t *testing.T) {
 // non-zero, so partial coverage is detectable by automation.
 func TestAuditSummary(t *testing.T) {
 	tests := []struct {
-		name                         string
-		orphans, audited, configured int
-		wantLine, wantWarn           string
-		wantNoLine, wantNoWarn       bool
+		name                                  string
+		orphans, blocked, audited, configured int
+		wantLine, wantWarn                    string
+		wantNotInLine                         string
+		wantNoLine, wantNoWarn                bool
 	}{
 		{
 			name:    "full coverage, nothing found",
@@ -134,15 +135,36 @@ func TestAuditSummary(t *testing.T) {
 			wantLine:   "🧹 no orphaned networknamespaces found (1/1 availability zone(s) audited)",
 			wantNoWarn: true,
 		},
+		{
+			// A listed orphan that delete would refuse can now only mean
+			// unreadable evidence, so the footnote points at investigating it
+			// rather than at deleting.
+			name:    "an undeletable orphan is called out, not left to the reader",
+			orphans: 3, blocked: 1, audited: 3, configured: 3,
+			wantLine:   "1 of them cannot be deleted",
+			wantNoWarn: true,
+		},
+		{
+			// Silent in the normal case: "0 of them are blocked" on every run
+			// is exactly the noise this command sheds elsewhere.
+			name:    "nothing blocked says nothing",
+			orphans: 3, blocked: 0, audited: 3, configured: 3,
+			wantLine:      "3 orphan(s), 3/3 availability zone(s) audited",
+			wantNotInLine: "cannot be deleted",
+			wantNoWarn:    true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			line, warning := auditSummary(tt.orphans, tt.audited, tt.configured)
+			line, warning := auditSummary(tt.orphans, tt.blocked, tt.audited, tt.configured)
 			if tt.wantNoLine && line != "" {
 				t.Errorf("line = %q, want none", line)
 			}
 			if tt.wantLine != "" && !strings.Contains(line, tt.wantLine) {
 				t.Errorf("line = %q, want it to contain %q", line, tt.wantLine)
+			}
+			if tt.wantNotInLine != "" && strings.Contains(line, tt.wantNotInLine) {
+				t.Errorf("line = %q, want it NOT to contain %q", line, tt.wantNotInLine)
 			}
 			if tt.wantNoWarn && warning != "" {
 				t.Errorf("warning = %q, want none for complete coverage", warning)
