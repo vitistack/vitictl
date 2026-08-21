@@ -112,7 +112,7 @@ func TestWriteJSONEmitsEmptyArrayNotNull(t *testing.T) {
 	}
 }
 
-// ROR's API types are tagged for JSON only. YAML output must follow those
+// Some API types are tagged for JSON only. YAML output must follow those
 // same tags — and honour inlining and omitempty — so -o yaml and -o json
 // describe the same document rather than leaking Go field names.
 func TestWriteYAMLFollowsJSONTags(t *testing.T) {
