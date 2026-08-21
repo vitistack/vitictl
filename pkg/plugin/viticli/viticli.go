@@ -104,9 +104,14 @@ func classify(ctx context.Context, bin string, childErr error, diagnose Diagnose
 // PluginDiagnosis distinguishes "plugin too old" (upgrade hint), "plugin not
 // installed" (install hint), and "real failure" (ErrChildFailed) by probing
 // --help at each level of probe; probe[0] is the plugin name, e.g.
-// []string{"kubevirt", "vm", "changemachineclass"}.
+// []string{"kubevirt", "vm", "changemachineclass"}. probe must name at least
+// the plugin (probe[0]); only a probe with a subcommand (len >= 2) can ever
+// produce the upgrade hint.
 func PluginDiagnosis(probe []string) DiagnoseFunc {
 	return func(ctx context.Context, bin string, childErr error) error {
+		if len(probe) == 0 {
+			return fmt.Errorf("%w: %v", ErrChildFailed, childErr)
+		}
 		sub := strings.Join(probe[1:], " ")
 		switch {
 		case probeOK(ctx, bin, append(append([]string{}, probe...), "--help")...):

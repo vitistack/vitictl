@@ -88,7 +88,7 @@ func printReleaseStatus(out io.Writer, o Options, latest *release.Latest) error 
 		_, _ = fmt.Fprintf(out, "🆕 a newer release is available: %s (you have %s)\n", latest.Tag, o.Version)
 		_, _ = fmt.Fprintf(out, "   release notes: %s\n", latest.URL)
 		_, _ = fmt.Fprintf(out, "   upgrade with:  %s\n", release.UpgradeHint(o.Name))
-		_, _ = fmt.Fprintf(out, "   or run:        %s --run\n", fmt.Sprintf("viti %s upgrade", o.Name))
+		_, _ = fmt.Fprintf(out, "   or run:        viti %s upgrade --run\n", o.Name)
 	case release.StatusAhead:
 		_, _ = fmt.Fprintf(out, "🧪 your build (%s) is ahead of the latest release (%s)\n", o.Version, latest.Tag)
 	case release.StatusDevelopment:
@@ -118,7 +118,7 @@ replaces the binary atomically. Pass --run to have this command invoke that
 for you.
 
 If the plugin's repository is private, the check needs a GitHub token: set
-GH_TOKEN (or GITHUB_TOKEN), or run "gh auth login".`, o.Name, o.Name, "viti plugin upgrade "+o.Name),
+GH_TOKEN (or GITHUB_TOKEN), or run "gh auth login".`, o.Name, o.Name, release.UpgradeHint(o.Name)),
 		Example: fmt.Sprintf(`  viti %s upgrade
   viti %s upgrade --run
   viti %s upgrade --run --yes`, o.Name, o.Name, o.Name),
@@ -173,7 +173,7 @@ GH_TOKEN (or GITHUB_TOKEN), or run "gh auth login".`, o.Name, o.Name, "viti plug
 		},
 	}
 	cmd.Flags().BoolVar(&run, "run", false,
-		fmt.Sprintf("run `%s` after printing instructions", "viti plugin upgrade "+o.Name))
+		fmt.Sprintf("run `%s` after printing instructions", release.UpgradeHint(o.Name)))
 	cmd.Flags().BoolVarP(&assume, "yes", "y", false,
 		"skip the confirmation prompt when used with --run")
 	return cmd

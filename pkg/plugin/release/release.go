@@ -2,12 +2,12 @@
 // plugin and compares it against the locally installed build. It backs each
 // plugin's `version --check` flag and `upgrade` command.
 //
-// vitictl has an equivalent package, but it talks to GitHub anonymously.
-// That does not work here: some plugin repositories are private, and GitHub
-// answers unauthenticated requests for private resources with 404 rather
-// than 403, so an unauthenticated lookup is indistinguishable from "this
-// repository has no releases". Requests are therefore authenticated
-// whenever a token can be found.
+// vitictl's own internal/release, which backs the CLI's self-update check,
+// talks to GitHub anonymously; plugins need more, because some plugin
+// repositories are private and GitHub answers unauthenticated requests for
+// private resources with 404 rather than 403, so an unauthenticated lookup
+// is indistinguishable from "this repository has no releases". Requests are
+// therefore authenticated whenever a token can be found.
 package release
 
 import (

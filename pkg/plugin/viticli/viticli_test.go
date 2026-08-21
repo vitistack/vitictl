@@ -245,6 +245,27 @@ func TestRunCancelledContextIsNotMisdiagnosed(t *testing.T) {
 	}
 }
 
+// PluginDiagnosis(nil) must not panic on an empty probe slice — it has
+// nothing to diagnose, so it falls back to the plain ErrChildFailed marker.
+func TestPluginDiagnosisWithNilProbeDoesNotPanic(t *testing.T) {
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "viti-stub")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orig := Binary
+	Binary = stub
+	defer func() { Binary = orig }()
+
+	err := Run(context.Background(),
+		Streams{In: strings.NewReader(""), Out: &strings.Builder{}, Err: &strings.Builder{}},
+		[]string{"kubevirt", "vm", "changemachineclass", "web-1", "--yes"},
+		PluginDiagnosis(nil))
+	if !errors.Is(err, ErrChildFailed) {
+		t.Fatalf("err = %v, want ErrChildFailed", err)
+	}
+}
+
 // A child killed before it could write anything (OOM kill, SIGTERM from
 // session cleanup) exits non-zero having reported nothing. Marking that
 // ErrChildFailed would make the wrapper exit non-zero in total silence — the

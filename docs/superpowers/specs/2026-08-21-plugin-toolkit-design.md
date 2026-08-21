@@ -72,12 +72,14 @@ type Options struct {
     Name    string // plugin name in viti's index, e.g. "kubevirt"
     Repo    string // GitHub owner/name, e.g. "vitistack/vitictl-kubevirt"
     Version string // ldflags-injected build version
-    Commit  string
 }
 func NewVersionCmd(o Options) *cobra.Command
 func NewUpgradeCmd(o Options) *cobra.Command
 func Confirm(cmd *cobra.Command, prompt string) (bool, error)
 ```
+
+Commit was dropped from Options during implementation: no plugin's version
+command prints a commit.
 
 Semantics are exactly today's plugin behavior: `version --check` exits 0 on
 an unreachable GitHub, `upgrade` exits non-zero; `upgrade --run` delegates to
