@@ -95,10 +95,16 @@ hardcoded subcommand is parameterized:
 var Binary = "viti" // tests point this at a stub
 var ErrNotInstalled, ErrChildFailed error
 type Streams struct{ In io.Reader; Out, Err io.Writer }
-// Run executes `viti <args...>` attached to the caller's streams. probe is
-// the subcommand whose existence distinguishes "old plugin" from "real
-// failure", e.g. []string{"kubevirt", "vm", "changemachineclass"}.
-func Run(ctx context.Context, s Streams, probe []string, args []string) error
+type DiagnoseFunc func(ctx context.Context, bin string, childErr error) error
+// Run executes `viti <args...>` attached to the caller's streams. Cancelled
+// contexts stay quiet and signal deaths are loud; diagnose (optional) is
+// consulted for normal non-zero exits — nil marks them all ErrChildFailed,
+// which suits shelling out to built-in viti commands.
+func Run(ctx context.Context, s Streams, args []string, diagnose DiagnoseFunc) error
+// PluginDiagnosis distinguishes plugin-too-old (upgrade hint) from
+// plugin-not-installed (install hint) by probing --help at each level;
+// probe[0] is the plugin name, e.g. ["kubevirt", "vm", "changemachineclass"].
+func PluginDiagnosis(probe []string) DiagnoseFunc
 ```
 
 Domain arg-builders (nhn's `Args(ChangeMachineClass)`) stay in their plugins.
