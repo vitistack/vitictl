@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	vitiv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
@@ -22,8 +23,29 @@ import (
 var (
 	nnOrphansNamespace   string
 	nnOrphansZoneTimeout time.Duration
+	nnOrphansMinAge      time.Duration
 	nnOrphansOutput      string
 )
+
+// tooYoung reports whether a netns is within minAge of now: the
+// provisioning-race guard. A netns is created before anything references it,
+// so during that window it is indistinguishable from an abandoned one — this
+// audit found its own freshly created netns reported as a deletable orphan at
+// 51 seconds old.
+//
+// A zero timestamp — never set by a real API server, only reachable in a test
+// — counts as old enough to report rather than being silently hidden.
+// Suppressing on missing data is the wrong failure mode for a filter whose
+// entire job is deciding what a human never sees.
+//
+// Mirrors tooYoung in vitictl-kubevirt's internal/vm/orphans.go, so --min-age
+// means the same thing in both audits.
+func tooYoung(t metav1.Time, minAge time.Duration, now time.Time) bool {
+	if t.IsZero() {
+		return false
+	}
+	return now.Sub(t.Time) < minAge
+}
 
 // zoneWarn reports a non-fatal problem through the command's own stderr
 // rather than the package-level warn (which writes to os.Stderr directly), so
@@ -78,45 +100,69 @@ func loadAllZones(ctx context.Context, clients []*kube.Client, namespace string,
 	return out
 }
 
-// auditSummary renders the coverage accounting for `nn orphans`.
+// auditCounts is what `nn orphans` found, passed as a struct rather than five
+// same-typed ints where a transposed pair would silently render a
+// plausible-looking wrong summary.
 //
-// configured is the number of CONFIGURED availability zones — never the
-// number that happened to connect. A zone whose kubeconfig is unreachable is
-// dropped by ConnectAll before any query runs, so counting only the survivors
-// made an audit of 2 zones out of 5 print "2/2 availability zone(s) audited"
-// and suppress the incomplete-audit warning entirely: a fleet-wide clean
-// verdict issued over three zones nobody looked at.
+// configured is the number of CONFIGURED availability zones — never the number
+// that happened to connect. A zone whose kubeconfig is unreachable is dropped
+// by ConnectAll before any query runs, so counting only the survivors made an
+// audit of 2 zones out of 5 print "2/2 availability zone(s) audited" and
+// suppress the incomplete-audit warning entirely: a fleet-wide clean verdict
+// issued over three zones nobody looked at.
+type auditCounts struct {
+	orphans    int // rows actually listed
+	blocked    int // listed, but `nn delete` would refuse them
+	suppressed int // withheld by --min-age
+	audited    int
+	configured int
+}
+
+// auditSummary renders the summary line for `nn orphans`.
 //
-// A non-empty warning means the caller must fail the command: partial
-// coverage has to be detectable by exit code, not only by reading stderr.
-// With zero coverage there is no line at all — a clean-sweep broom over an
-// audit that never happened is the worst possible output.
+// A non-empty warning means the caller must fail the command: partial coverage
+// has to be detectable by exit code, not only by reading stderr. With zero
+// coverage there is no line at all — a clean-sweep broom over an audit that
+// never happened is the worst possible output.
 //
-// blocked counts listed orphans that `nn delete` would nonetheless refuse.
-// Since a claimed netns is no longer listed at all (netns.Orphans), the only
-// way that happens is unreadable evidence — so the footnote points at
-// investigation rather than at deletion. It is silent when the count is zero,
-// which is the normal case: saying "0 of them are blocked" on every run is the
-// noise this command already sheds elsewhere.
-func auditSummary(orphans, blocked, audited, configured int) (line, warning string) {
-	scope := fmt.Sprintf("%d/%d availability zone(s) audited", audited, configured)
+// blocked is silent at zero, which is the normal case: saying "0 of them are
+// blocked" on every run is the noise this command sheds elsewhere. Since a
+// claimed netns is no longer listed at all (netns.Orphans), a blocked row can
+// only mean unreadable evidence, so the note points at investigating rather
+// than deleting.
+//
+// suppressed is never silent, because a withheld finding is the one thing a
+// reader cannot discover from the output. The broom in particular is qualified
+// when everything found was too young: "no orphans found" over a fleet where
+// three were held back is the same false clean verdict the coverage accounting
+// exists to prevent.
+func auditSummary(c auditCounts) (line, warning string) {
+	scope := fmt.Sprintf("%d/%d availability zone(s) audited", c.audited, c.configured)
 	switch {
-	case audited == 0:
+	case c.audited == 0:
 		warning = fmt.Sprintf("incomplete audit: NO availability zone could be audited (0/%d) — "+
-			"nothing was verified, and this is NOT a clean result", configured)
+			"nothing was verified, and this is NOT a clean result", c.configured)
 		return "", warning
-	case orphans == 0:
+	case c.orphans == 0 && c.suppressed > 0:
+		line = fmt.Sprintf("🧹 no orphaned networknamespaces old enough to report (%s) — "+
+			"%d held back by --min-age\n", scope, c.suppressed)
+	case c.orphans == 0:
 		line = fmt.Sprintf("🧹 no orphaned networknamespaces found (%s)\n", scope)
 	default:
-		line = fmt.Sprintf("\n%d orphan(s), %s. Delete deliberately with: viti nn delete <name>\n", orphans, scope)
-		if blocked > 0 {
+		line = fmt.Sprintf("\n%d orphan(s), %s. Delete deliberately with: viti nn delete <name>\n", c.orphans, scope)
+		if c.blocked > 0 {
 			line += fmt.Sprintf("   %d of them cannot be deleted: evidence about them could not be read, "+
-				"so being unclaimed is unproven. Run with -o json for the records.\n", blocked)
+				"so being unclaimed is unproven. Run with -o json for the records.\n", c.blocked)
+		}
+		if c.suppressed > 0 {
+			line += fmt.Sprintf("   %d more held back by --min-age as too young to judge\n", c.suppressed)
 		}
 	}
-	if audited < configured {
+	// Suppression is not a failure: --min-age withholding a too-young netns is
+	// the filter working. Only short coverage sets the exit code.
+	if c.audited < c.configured {
 		warning = fmt.Sprintf("incomplete audit: %d of %d availability zone(s) could not be audited — "+
-			"orphaned networknamespaces there are NOT listed above", configured-audited, configured)
+			"orphaned networknamespaces there are NOT listed above", c.configured-c.audited, c.configured)
 	}
 	return line, warning
 }
@@ -146,6 +192,12 @@ Columns:
   GHOST-ASSOC  stale status association ids with no live cluster — a known
                cosmetic operator bug, shown for visibility, never trusted
 
+--min-age (default 15m) withholds anything younger, because a netns is created
+before anything references it: for that window a perfectly healthy one being
+provisioned is indistinguishable from an abandoned one. The number withheld is
+always reported, so a filtered-to-zero result never reads as a clean fleet.
+Pass --min-age 0 to see everything.
+
 Read-only. An orphan is a deletion CANDIDATE, not a verdict: an empty team
 namespace may be about to receive new clusters.
 
@@ -172,7 +224,10 @@ automation cannot mistake partial coverage for a clean fleet.`,
 		}
 
 		var found []orphanReport
-		total, blocked, audited := 0, 0, 0
+		total, blocked, suppressed, audited := 0, 0, 0, 0
+		// One clock for the whole audit: reading time.Now() per netns would let
+		// two zones judge the same --min-age boundary differently.
+		now := time.Now()
 		for i, res := range loadAllZones(ctx, clients, nnOrphansNamespace, nnOrphansZoneTimeout) {
 			c := clients[i]
 			if res.err != nil {
@@ -181,6 +236,10 @@ automation cannot mistake partial coverage for a clean fleet.`,
 			}
 			audited++
 			for _, o := range netns.Orphans(res.snap) {
+				if tooYoung(o.NN.CreationTimestamp, nnOrphansMinAge, now) {
+					suppressed++
+					continue
+				}
 				total++
 				report := newOrphanReport(c.AZ.Name, o)
 				if !report.Deletable {
@@ -189,12 +248,19 @@ automation cannot mistake partial coverage for a clean fleet.`,
 				found = append(found, report)
 			}
 		}
+		counts := auditCounts{
+			orphans: total, blocked: blocked, suppressed: suppressed,
+			audited: audited, configured: len(zones),
+		}
 
 		// Structured output is the whole payload: no table, no summary prose —
 		// callers piping this want the records, and the coverage numbers travel
 		// with them so a partial audit stays detectable after the pipe.
 		if format.IsStructured() {
-			report := orphanAudit{Orphans: found, ZonesAudited: audited, ZonesConfigured: len(zones)}
+			report := orphanAudit{
+				Orphans: found, ZonesAudited: audited, ZonesConfigured: len(zones),
+				SuppressedByMinAge: suppressed,
+			}
 			if report.Orphans == nil {
 				report.Orphans = []orphanReport{}
 			}
@@ -202,7 +268,7 @@ automation cannot mistake partial coverage for a clean fleet.`,
 				return err
 			}
 			if audited < len(zones) {
-				_, warning := auditSummary(total, blocked, audited, len(zones))
+				_, warning := auditSummary(counts)
 				return errors.New(warning)
 			}
 			return nil
@@ -213,7 +279,7 @@ automation cannot mistake partial coverage for a clean fleet.`,
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "networknamespace/%s/%s\n", o.Namespace, o.Name)
 			}
 			if audited < len(zones) {
-				_, warning := auditSummary(total, blocked, audited, len(zones))
+				_, warning := auditSummary(counts)
 				return errors.New(warning)
 			}
 			return nil
@@ -239,7 +305,7 @@ automation cannot mistake partial coverage for a clean fleet.`,
 
 		// Coverage is reported explicitly: a zone that could not be queried
 		// must never read as a zone with nothing in it.
-		line, warning := auditSummary(total, blocked, audited, len(zones))
+		line, warning := auditSummary(counts)
 		if line != "" {
 			_, _ = fmt.Fprint(cmd.OutOrStdout(), line)
 		}
@@ -514,6 +580,8 @@ func init() {
 	nnOrphansCmd.Flags().StringVarP(&nnOrphansOutput, "output", "o", "", outputFlagHelp)
 	nnOrphansCmd.Flags().DurationVar(&nnOrphansZoneTimeout, "zone-timeout", 30*time.Second,
 		"per-availability-zone query budget; a zone that exceeds it is reported and skipped")
+	nnOrphansCmd.Flags().DurationVar(&nnOrphansMinAge, "min-age", 15*time.Minute,
+		"ignore networknamespaces younger than this, so routine provisioning is not reported as abandoned (0 disables)")
 
 	nnDeleteCmd.Flags().StringVarP(&nnDeleteNamespace, "namespace", "n", "", "namespace of the networknamespace")
 	nnDeleteCmd.Flags().BoolVar(&nnDeleteYes, "yes", false, "skip the confirmation prompt")

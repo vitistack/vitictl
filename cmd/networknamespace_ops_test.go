@@ -88,13 +88,54 @@ func TestConfirmTypedNameKeepsBothPrompts(t *testing.T) {
 // audited" for a fleet of five — a clean-sweep verdict covering three zones
 // nobody queried. A non-empty warning is what makes the command exit
 // non-zero, so partial coverage is detectable by automation.
+func TestTooYoung(t *testing.T) {
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) metav1.Time { return metav1.NewTime(now.Add(-d)) }
+
+	cases := []struct {
+		name   string
+		age    time.Duration
+		minAge time.Duration
+		want   bool
+	}{
+		{"the 51-second netns this filter exists for", 51 * time.Second, 15 * time.Minute, true},
+		{"just inside the window", 14*time.Minute + 59*time.Second, 15 * time.Minute, true},
+		{"exactly at the boundary is old enough", 15 * time.Minute, 15 * time.Minute, false},
+		{"comfortably old", 52 * 24 * time.Hour, 15 * time.Minute, false},
+		{"min-age 0 suppresses nothing", time.Second, 0, false},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tooYoung(at(tt.age), tt.minAge, now); got != tt.want {
+				t.Errorf("tooYoung(age=%s, minAge=%s) = %v, want %v", tt.age, tt.minAge, got, tt.want)
+			}
+		})
+	}
+
+	// Fail open on missing data: a filter that decides what a human never sees
+	// must not hide a finding it cannot date.
+	if tooYoung(metav1.Time{}, time.Hour, now) {
+		t.Error("a zero timestamp must be reported, not silently suppressed")
+	}
+
+	// A future-dated netns (client clock skewed behind the API server) gives a
+	// negative age and is suppressed. That is the right way round: mild skew is
+	// the realistic cause and such a netns is by definition brand new, so
+	// showing it would reintroduce exactly the bug --min-age fixes. It is not
+	// the missing-data case above — a timestamp that exists and reads "just
+	// now" is information, not an absence.
+	if !tooYoung(metav1.NewTime(now.Add(time.Minute)), 15*time.Minute, now) {
+		t.Error("a future-dated netns is brand new and must be suppressed, not reported")
+	}
+}
+
 func TestAuditSummary(t *testing.T) {
 	tests := []struct {
-		name                                  string
-		orphans, blocked, audited, configured int
-		wantLine, wantWarn                    string
-		wantNotInLine                         string
-		wantNoLine, wantNoWarn                bool
+		name                                              string
+		orphans, blocked, suppressed, audited, configured int
+		wantLine, wantWarn                                string
+		wantNotInLine                                     string
+		wantNoLine, wantNoWarn                            bool
 	}{
 		{
 			name:    "full coverage, nothing found",
@@ -153,10 +194,45 @@ func TestAuditSummary(t *testing.T) {
 			wantNotInLine: "cannot be deleted",
 			wantNoWarn:    true,
 		},
+		{
+			// The regression --min-age exists for: this audit reported its own
+			// freshly created netns as a deletable orphan at 51 seconds old.
+			name:    "orphans plus suppressed reports both",
+			orphans: 2, suppressed: 1, audited: 3, configured: 3,
+			wantLine:   "1 more held back by --min-age",
+			wantNoWarn: true,
+		},
+		{
+			// The dangerous case: everything found was too young, so an
+			// unqualified broom would read as "the fleet is clean" when three
+			// findings were withheld.
+			name:    "all findings suppressed must not read as a clean sweep",
+			orphans: 0, suppressed: 3, audited: 3, configured: 3,
+			wantLine:      "3 held back by --min-age",
+			wantNotInLine: "no orphaned networknamespaces found",
+			wantNoWarn:    true,
+		},
+		{
+			// Suppression is the filter working, not a failure — only short
+			// coverage may set the exit code.
+			name:    "suppression alone never fails the command",
+			orphans: 0, suppressed: 5, audited: 2, configured: 2,
+			wantNoWarn: true,
+		},
+		{
+			name:    "nothing suppressed says nothing about min-age",
+			orphans: 1, suppressed: 0, audited: 1, configured: 1,
+			wantLine:      "1 orphan(s), 1/1 availability zone(s) audited",
+			wantNotInLine: "min-age",
+			wantNoWarn:    true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			line, warning := auditSummary(tt.orphans, tt.blocked, tt.audited, tt.configured)
+			line, warning := auditSummary(auditCounts{
+				orphans: tt.orphans, blocked: tt.blocked, suppressed: tt.suppressed,
+				audited: tt.audited, configured: tt.configured,
+			})
 			if tt.wantNoLine && line != "" {
 				t.Errorf("line = %q, want none", line)
 			}

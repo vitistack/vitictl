@@ -56,6 +56,11 @@ type orphanAudit struct {
 	ZonesAudited    int            `json:"zonesAudited"`
 	ZonesConfigured int            `json:"zonesConfigured"`
 	Complete        bool           `json:"complete"`
+	// SuppressedByMinAge travels for the same reason as the coverage counts: a
+	// caller reading this after a pipe has lost the summary line, and "no
+	// orphans" is a different fact from "none old enough to judge yet". Named
+	// to match vitictl-kubevirt's orphan report.
+	SuppressedByMinAge int `json:"suppressedByMinAge"`
 }
 
 func newOrphanReport(azName string, o netns.Orphan) orphanReport {
