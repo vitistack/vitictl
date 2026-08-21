@@ -137,8 +137,8 @@ func describeError(code int, status, repo string, haveToken bool) error {
 	switch {
 	case code == http.StatusNotFound && !haveToken:
 		return fmt.Errorf(
-			"github API returned 404 for %s — the repository is private, or it has no releases yet. "+
-				"Authenticate first: set GH_TOKEN (or GITHUB_TOKEN), or run 'gh auth login'",
+			"github API returned 404 for %s — it has no releases yet, or you do not have access to it. "+
+				"If it is private, authenticate first: set GH_TOKEN (or GITHUB_TOKEN), or run 'gh auth login'",
 			repo)
 	case code == http.StatusNotFound:
 		return fmt.Errorf(

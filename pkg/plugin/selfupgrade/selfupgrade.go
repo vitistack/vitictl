@@ -54,7 +54,7 @@ or unauthenticated is not a failure of "version".`, o.Name),
 			if !check {
 				return nil
 			}
-			return printReleaseCheck(cmd.Context(), out, o)
+			return printReleaseCheck(cmdContext(cmd), out, o)
 		},
 	}
 	cmd.Flags().BoolVar(&check, "check", false,
@@ -117,15 +117,15 @@ SHA-256 checksum and (when cosign is installed) its Sigstore signature, and
 replaces the binary atomically. Pass --run to have this command invoke that
 for you.
 
-If the plugin's repository is private, the check needs a GitHub token: set
-GH_TOKEN (or GITHUB_TOKEN), or run "gh auth login".`, o.Name, o.Name, release.UpgradeHint(o.Name)),
+If the plugin's repository is private, the check and the upgrade need a
+GitHub token: set GH_TOKEN (or GITHUB_TOKEN), or run "gh auth login".`, o.Name, o.Name, release.UpgradeHint(o.Name)),
 		Example: fmt.Sprintf(`  viti %s upgrade
   viti %s upgrade --run
   viti %s upgrade --run --yes`, o.Name, o.Name, o.Name),
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			out := cmd.OutOrStdout()
-			latest, err := release.FetchLatest(cmd.Context(), o.Repo)
+			latest, err := release.FetchLatest(cmdContext(cmd), o.Repo)
 			if err != nil {
 				return fmt.Errorf("could not check for updates: %w", err)
 			}
@@ -216,9 +216,20 @@ func runPluginUpgrade(cmd *cobra.Command, o Options) error {
 			release.UpgradeHint(o.Name))
 	}
 	// #nosec G204 -- viti is resolved from PATH and invoked with fixed arguments.
-	c := exec.CommandContext(cmd.Context(), viti, "plugin", "upgrade", o.Name)
+	c := exec.CommandContext(cmdContext(cmd), viti, "plugin", "upgrade", o.Name)
 	c.Stdout = cmd.OutOrStdout()
 	c.Stderr = cmd.ErrOrStderr()
 	c.Stdin = cmd.InOrStdin()
 	return c.Run()
+}
+
+// cmdContext returns the command's context, falling back to Background: cobra
+// only sets a context via Execute, so a bare-constructed command handed
+// straight to RunE (tests, embedders) would otherwise panic in
+// context.WithTimeout and exec.CommandContext.
+func cmdContext(cmd *cobra.Command) context.Context {
+	if ctx := cmd.Context(); ctx != nil {
+		return ctx
+	}
+	return context.Background()
 }

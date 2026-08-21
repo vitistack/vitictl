@@ -250,3 +250,33 @@ func TestPrintReleaseStatus(t *testing.T) {
 		})
 	}
 }
+
+// cmdContext is the nil-safety seam: cobra only sets a command's context via
+// Execute, so a bare-constructed command handed straight to RunE (as tests
+// and embedders do) would otherwise panic in context.WithTimeout /
+// exec.CommandContext.
+func TestCmdContextFallsBackToBackground(t *testing.T) {
+	bare := &cobra.Command{}
+	if ctx := cmdContext(bare); ctx == nil {
+		t.Fatal("cmdContext(bare command) = nil, want context.Background()")
+	}
+	want := context.WithValue(context.Background(), ctxKeyForTest{}, "v")
+	withCtx := &cobra.Command{}
+	withCtx.SetContext(want)
+	if got := cmdContext(withCtx); got != want {
+		t.Errorf("cmdContext dropped the command's real context")
+	}
+}
+
+type ctxKeyForTest struct{}
+
+// The private-repo guidance must cover both operations that need the token —
+// a user who authenticates only for the check would then watch the upgrade
+// fail.
+func TestUpgradeHelpSaysBothCheckAndUpgradeNeedTheToken(t *testing.T) {
+	cmd := NewUpgradeCmd(Options{Name: "example", Repo: "vitistack/example", Version: "v1.0.0"})
+	unwrapped := strings.ReplaceAll(cmd.Long, "\n", " ")
+	if !strings.Contains(unwrapped, "the check and the upgrade need a GitHub token") {
+		t.Errorf("upgrade Long %q should say the check AND the upgrade need the token", cmd.Long)
+	}
+}

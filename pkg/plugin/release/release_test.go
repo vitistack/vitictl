@@ -134,6 +134,15 @@ func TestFetchLatest404WithoutTokenExplainsHowToAuthenticate(t *testing.T) {
 			t.Errorf("error %q should mention %q", err, want)
 		}
 	}
+	// The message must stay visibility-neutral: asserting "the repository is
+	// private" is false for a public repo that was renamed or has no releases
+	// yet. Only the conditional form is allowed.
+	if strings.Contains(err.Error(), "the repository is private") {
+		t.Errorf("error %q asserts the repo is private; it must stay conditional", err)
+	}
+	if !strings.Contains(err.Error(), "If it is private") {
+		t.Errorf("error %q should carry the conditional private-repo hint", err)
+	}
 }
 
 func TestFetchLatest404WithTokenPointsAtAccess(t *testing.T) {
