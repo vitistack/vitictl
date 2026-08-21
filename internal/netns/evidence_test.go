@@ -174,7 +174,7 @@ func TestEvidenceGhostAssociations(t *testing.T) {
 	// blocked, but the ghost itself must never contribute to Blocked().
 }
 
-func TestOrphansSelectsOnlyUnreferenced(t *testing.T) {
+func TestOrphansSelectsOnlyUnclaimed(t *testing.T) {
 	used := nn("team-a", "team-a-x1", 2100)
 	orphan := nn("team-b", "team-b-z9", 2200)
 	s := &Snapshot{
@@ -185,6 +185,97 @@ func TestOrphansSelectsOnlyUnreferenced(t *testing.T) {
 	if len(got) != 1 || got[0].NN.Name != "team-b-z9" {
 		t.Fatalf("Orphans = %d hits, want exactly team-b-z9", len(got))
 	}
-	// An orphan (no KC refs) can still carry blocking evidence (NC/ipalloc)
-	// — Orphans lists it anyway; delete's gates are what refuse.
+}
+
+func TestOrphansExcludesNetNSClaimedOnlyByVlanInterface(t *testing.T) {
+	// The regression this exists for. d-trd-atlas-001 (ptr1, created
+	// 2026-02-17) is live and Ready but names no netns, because the operator
+	// did not write spec.data.networkNamespaceName until ~2026-06-02. Its
+	// NetworkConfigurations do not carry the name either — only a vlan2470
+	// interface. Filtering on the KC reference alone listed a live 6-node
+	// cluster's VLAN as an orphan.
+	target := nn("vitistack-atlas", "vitistack-atlas", 2470)
+	s := &Snapshot{
+		NetNSs: []vitiv1alpha1.NetworkNamespace{*target},
+		// No KC references it: the pre-June cluster names no netns at all.
+		KCs: []vitiv1alpha1.KubernetesCluster{kc("vitistack-atlas", "d-trd-atlas-001", "d-trd-atlas-001-xdf2", "")},
+		NCs: []vitiv1alpha1.NetworkConfiguration{
+			ncByVlan("vitistack-atlas", "d-trd-atlas-001-xdf2-ctp0", 2470),
+			ncByVlan("vitistack-atlas", "d-trd-atlas-001-xdf2-wrk3", 2470),
+		},
+	}
+	if got := Orphans(s); len(got) != 0 {
+		t.Fatalf("Orphans = %d hits, want 0: a netns whose vlan is carrying "+
+			"machines is in use, whatever the KubernetesCluster fails to say", len(got))
+	}
+}
+
+func TestOrphansExcludesNetNSClaimedByLiveIPAllocation(t *testing.T) {
+	target := nn("team-a", "team-a-x1", 2100)
+	s := &Snapshot{
+		NetNSs:            []vitiv1alpha1.NetworkNamespace{*target},
+		IPAllocs:          []unstructured.Unstructured{ipalloc("team-a", "alloc-1", "team-a-x1")},
+		IPAllocCRDPresent: true,
+	}
+	if got := Orphans(s); len(got) != 0 {
+		t.Fatalf("Orphans = %d hits, want 0: a live IPAllocation is a claim", len(got))
+	}
+}
+
+func TestOrphansStillListsUnreadableIPAllocations(t *testing.T) {
+	// Unknown is not a claim, so the netns is listed — but it is not
+	// deletable, and dropping it would hide the only genuinely anomalous
+	// case (a schema change or a hand-edited record) behind a clean sweep.
+	target := nn("team-a", "team-a-x1", 2100)
+	broken := unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{}}}
+	broken.SetNamespace("team-a")
+	broken.SetName("alloc-broken")
+	s := &Snapshot{
+		NetNSs:            []vitiv1alpha1.NetworkNamespace{*target},
+		IPAllocs:          []unstructured.Unstructured{broken},
+		IPAllocCRDPresent: true,
+	}
+	got := Orphans(s)
+	if len(got) != 1 {
+		t.Fatalf("Orphans = %d hits, want 1: an unreadable record must not be silently swept", len(got))
+	}
+	if got[0].Ev.InUse() {
+		t.Error("an unreadable ipallocation is not a claim — InUse must stay false")
+	}
+	if !got[0].Ev.Blocked() {
+		t.Error("an unreadable ipallocation must still block deletion (fail-closed)")
+	}
+}
+
+func TestBlockedIsUnchangedByTheInUseSplit(t *testing.T) {
+	// Blocked() must keep meaning exactly what it meant before InUse was
+	// factored out of it: nn delete's two gates and the kc delete advisory
+	// all key on it, and this change was never meant to move them.
+	cases := []struct {
+		name string
+		ev   Evidence
+		want bool
+	}{
+		{"nothing", Evidence{IPAllocCount: -1}, false},
+		{"kc ref", Evidence{IPAllocCount: -1, ReferencingKCs: []string{"c1"}}, true},
+		{"nc ref", Evidence{IPAllocCount: -1, NCRefs: []string{"nc1"}}, true},
+		{"live ipalloc", Evidence{IPAllocCount: 1}, true},
+		{"zero ipallocs", Evidence{IPAllocCount: 0}, false},
+		{"unevaluated only", Evidence{IPAllocCount: 0, IPAllocUnevaluated: []string{"a1"}}, true},
+		{"ghosts only", Evidence{IPAllocCount: -1, GhostAssocIDs: []string{"dead"}}, false},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			ev := tt.ev
+			if got := ev.Blocked(); got != tt.want {
+				t.Errorf("Blocked() = %v, want %v", got, tt.want)
+			}
+			// The one legitimate divergence: unevaluated records block
+			// without being a claim.
+			wantInUse := tt.want && len(tt.ev.IPAllocUnevaluated) == 0
+			if got := ev.InUse(); got != wantInUse {
+				t.Errorf("InUse() = %v, want %v", got, wantInUse)
+			}
+		})
+	}
 }

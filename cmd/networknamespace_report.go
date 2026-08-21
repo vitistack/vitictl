@@ -19,16 +19,20 @@ import (
 // evaluated), which lives nowhere in the CR. Emitting the CR would hand
 // callers the one thing they can already get from `nn get`.
 type orphanReport struct {
-	AvailabilityZone string   `json:"availabilityZone"`
-	Namespace        string   `json:"namespace"`
-	Name             string   `json:"name"`
-	Phase            string   `json:"phase,omitempty"`
-	Age              string   `json:"age,omitempty"`
-	VlanID           int      `json:"vlanId"`
-	IPv4Prefix       string   `json:"ipv4Prefix,omitempty"`
-	IPv6Prefix       string   `json:"ipv6Prefix,omitempty"`
-	IPv4EgressIP     string   `json:"ipv4EgressIp,omitempty"`
-	NCRefs           []string `json:"networkConfigurationRefs,omitempty"`
+	AvailabilityZone string `json:"availabilityZone"`
+	Namespace        string `json:"namespace"`
+	Name             string `json:"name"`
+	Phase            string `json:"phase,omitempty"`
+	Age              string `json:"age,omitempty"`
+	VlanID           int    `json:"vlanId"`
+	IPv4Prefix       string `json:"ipv4Prefix,omitempty"`
+	IPv6Prefix       string `json:"ipv6Prefix,omitempty"`
+	IPv4EgressIP     string `json:"ipv4EgressIp,omitempty"`
+	// No NetworkConfiguration refs: a bound NetworkConfiguration disqualifies
+	// the netns from being an orphan at all (netns.Orphans), so the field
+	// could only ever be empty. Carrying it would invite a future reader to
+	// "fix" the renderer to display a value that cannot exist.
+	//
 	// IPAllocCount is -1 when the IPAllocation CRD is not installed on the
 	// zone, which is not the same as zero and must stay distinguishable.
 	IPAllocCount       int      `json:"ipAllocationCount"`
@@ -65,7 +69,6 @@ func newOrphanReport(azName string, o netns.Orphan) orphanReport {
 		IPv4Prefix:         o.NN.Status.IPv4Prefix,
 		IPv6Prefix:         o.NN.Status.IPv6Prefix,
 		IPv4EgressIP:       o.NN.Status.IPv4EgressIP,
-		NCRefs:             ev.NCRefs,
 		IPAllocCount:       ev.IPAllocCount,
 		IPAllocUnevaluated: ev.IPAllocUnevaluated,
 		GhostAssocIDs:      ev.GhostAssocIDs,

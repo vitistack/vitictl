@@ -5,8 +5,11 @@
 // never finalizer removal.
 //
 // Both verbs (orphans, delete) compute in-use-ness from the same Snapshot +
-// EvidenceFor pair: delete refuses for exactly the reasons orphans would
-// have listed the object.
+// EvidenceFor pair, so the two can never disagree about what claims a netns.
+// They read that evidence at different thresholds: orphans lists what nothing
+// claims (InUse), delete additionally refuses what cannot be resolved
+// (Blocked). Everything orphans lists is therefore deletable except where the
+// evidence itself is unreadable, which the report says out loud.
 package netns
 
 import (
@@ -46,12 +49,26 @@ type Evidence struct {
 	VlanKnown          bool     // status.vlanId assigned; when false the vlan-interface match cannot apply
 }
 
+// InUse reports whether anything positively claims this netns: a
+// KubernetesCluster naming it, a NetworkConfiguration bound to it (by name or
+// by vlan<id> interface), or a live IPAllocation pointing at it.
+//
+// Unevaluated ipallocations are deliberately NOT in use. Unknown is not a
+// claim, and it is not absence either — which is why it blocks deletion
+// (below) while still leaving the netns worth reporting.
+func (e *Evidence) InUse() bool {
+	return len(e.ReferencingKCs) > 0 || len(e.NCRefs) > 0 || e.IPAllocCount > 0
+}
+
 // Blocked reports whether any hard gate refuses deletion. Unevaluated
 // ipallocations block on purpose (fail-closed): the alternative is deleting
 // external NAM state while records that may point at it are unaccounted for.
+//
+// This is InUse plus that fail-closed case, which is exactly the set of gates
+// it has always been — the split exists so the audit can distinguish "in use"
+// from "not deletable", not to change what delete refuses.
 func (e *Evidence) Blocked() bool {
-	return len(e.ReferencingKCs) > 0 || len(e.NCRefs) > 0 ||
-		e.IPAllocCount > 0 || len(e.IPAllocUnevaluated) > 0
+	return e.InUse() || len(e.IPAllocUnevaluated) > 0
 }
 
 func vlanInterfaceName(vlan int) string { return fmt.Sprintf("vlan%d", vlan) }
@@ -132,20 +149,39 @@ func EvidenceFor(s *Snapshot, nn *vitiv1alpha1.NetworkNamespace) Evidence {
 	return ev
 }
 
-// Orphan is a netns with zero referencing KubernetesClusters, plus its full
-// evidence (which may still block deletion — NC leftovers, IPAllocations).
+// Orphan is a netns nothing claims, plus its full evidence. Deletion may
+// still be blocked: an ipallocation whose target could not be read leaves the
+// netns unclaimed as far as anything can tell, but not safe to delete.
 type Orphan struct {
 	NN *vitiv1alpha1.NetworkNamespace
 	Ev Evidence
 }
 
-// Orphans returns the snapshot's unreferenced netns in input order.
+// Orphans returns the snapshot's unclaimed netns in input order.
+//
+// The filter is InUse, not "no referencing KubernetesCluster". Selecting on
+// the KC reference alone reported live clusters as orphans: the operator only
+// began writing spec.data.networkNamespaceName around 2026-06-02, so a
+// cluster created before that names no netns at all. Three such clusters were
+// live on ptr1 when this was found (d-trd-atlas-001, t-trd-obao-001,
+// d-amk-003, all created February 2026); two of them were alone in their
+// namespace and so surfaced as orphans, while the third was masked only by a
+// newer sibling cluster that did populate the field.
+//
+// Their NetworkConfigurations still claimed the vlan<id> interface, so delete
+// refused — the audit was wrong, not the gate. Reporting a netns whose VLAN
+// is demonstrably carrying machines trains people to ignore the command.
+//
+// A NetworkConfiguration left behind with no cluster is therefore not
+// reported here either: that is drift in a NetworkConfiguration, and calling
+// it an orphaned NetworkNamespace would point the reader at the wrong object
+// to delete. It belongs in its own audit kind if it is ever worth reporting.
 func Orphans(s *Snapshot) []Orphan {
 	var out []Orphan
 	for i := range s.NetNSs {
 		n := &s.NetNSs[i]
 		ev := EvidenceFor(s, n)
-		if len(ev.ReferencingKCs) == 0 {
+		if !ev.InUse() {
 			out = append(out, Orphan{NN: n, Ev: ev})
 		}
 	}

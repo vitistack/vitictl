@@ -28,11 +28,14 @@ func TestOrphanReportMarksDeletableFromTheSameGates(t *testing.T) {
 	if !clean.Deletable {
 		t.Error("an unblocked orphan must report deletable=true")
 	}
+	// The only way a LISTED orphan is undeletable: netns.Orphans excludes
+	// anything a KubernetesCluster, NetworkConfiguration or live IPAllocation
+	// claims, so an unreadable ipallocation record is what remains.
 	blocked := newOrphanReport("az1", orphanFixture(netns.Evidence{
-		IPAllocCount: 0, NCRefs: []string{"m1-nc"},
+		IPAllocCount: 0, IPAllocUnevaluated: []string{"alloc-broken"},
 	}))
 	if blocked.Deletable {
-		t.Error("an orphan with a bound NetworkConfiguration must report deletable=false")
+		t.Error("an orphan with an unreadable IPAllocation must report deletable=false")
 	}
 }
 
