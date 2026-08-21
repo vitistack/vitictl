@@ -416,6 +416,12 @@ Two details are easy to get wrong:
 
 `plugins.yaml` documents the per-entry overrides for layouts that differ.
 
+Plugin authors: the shared toolkit lives at
+`github.com/vitistack/vitictl/pkg/plugin` — the interactive picker, `-o`
+output, release checks, the viti shell-out helper, and the standard
+`version`/`upgrade` commands. Pin an exact vitictl version; the package
+makes no compatibility promise between v0 tags.
+
 ### Private plugin repositories
 
 Public plugins need no setup. For a plugin hosted in a **private** repository,
