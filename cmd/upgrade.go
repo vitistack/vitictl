@@ -16,22 +16,23 @@ import (
 )
 
 var (
-	upgradeRun       bool
-	upgradeAssume    bool
-	upgradeNoPlugins bool
+	upgradeRunDeprecated bool
+	upgradeAssume        bool
+	upgradeNoPlugins     bool
+	upgradeCheck         bool
 )
 
 var upgradeCmd = &cobra.Command{
 	Use:   "upgrade",
-	Short: "⬆️  Check for newer releases of viti and its plugins, and upgrade",
+	Short: "⬆️  Upgrade viti and every installed plugin",
 	Long: `Checks GitHub for the latest released version of viti — and of every
-installed plugin — then, if anything newer is available, prints how to
-upgrade.
+installed plugin — and upgrades whatever is outdated, behind a single
+confirmation. viti itself goes through the official installer script (which
+verifies SHA-256 checksums and, when cosign is installed, the Sigstore
+signature); the plugins go through the same verified path as
+"viti plugin upgrade".
 
-Pass --run to do it: viti itself is upgraded through the official installer
-script (which verifies SHA-256 checksums and, when cosign is installed, the
-Sigstore signature), and the plugins through the same verified path as
-"viti plugin upgrade". One confirmation covers the whole operation.
+--check only reports what would be upgraded and changes nothing.
 --no-plugins restricts everything to viti itself.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
@@ -51,14 +52,15 @@ Sigstore signature), and the plugins through the same verified path as
 		case release.StatusAhead:
 			_, _ = fmt.Fprintln(out, "🧪 local build is ahead of the latest release")
 		case release.StatusDevelopment:
-			_, _ = fmt.Fprintln(out, "🛠  development build — use the installer to switch to the latest release:")
+			_, _ = fmt.Fprintln(out, "🛠  development build — the installer switches to the latest release")
 		case release.StatusOutdated:
 			_, _ = fmt.Fprintln(out, "🆕 a newer release is available")
 		}
 		cmdline := release.UpgradeHint()
-		if status == release.StatusOutdated || status == release.StatusDevelopment {
+		needSelf := status == release.StatusOutdated || status == release.StatusDevelopment
+		if needSelf {
 			_, _ = fmt.Fprintf(out, "   release notes: %s\n", latest.URL)
-			_, _ = fmt.Fprintf(out, "   upgrade with:  %s\n", cmdline)
+			_, _ = fmt.Fprintf(out, "   installer:     %s\n", cmdline)
 		}
 
 		// The plugins recorded in ~/.vitistack/plugins ride along, so one
@@ -73,32 +75,42 @@ Sigstore signature), and the plugins through the same verified path as
 			}
 		}
 
-		if !upgradeRun {
-			outdatedPlugins := 0
-			for _, s := range states {
-				latestV, verr := pluginmgr.LatestVersion(cmd.Context(), s.Repo)
-				if verr == nil && release.Compare(s.Version, latestV) == release.StatusOutdated {
-					outdatedPlugins++
-				}
-				_, _ = fmt.Fprintln(out, pluginStatusLine(s.Name, s.Version, latestV, verr))
+		// One status line per plugin; collect the ones with work to do. A
+		// plugin whose check failed (private repo without a token, offline)
+		// stays in the working set — the upgrade attempt itself will say
+		// exactly what is wrong.
+		var needWork []*pluginmgr.State
+		outdatedPlugins := 0
+		for _, s := range states {
+			latestV, verr := pluginmgr.LatestVersion(cmd.Context(), s.Repo)
+			switch {
+			case verr != nil:
+				needWork = append(needWork, s)
+			case release.Compare(s.Version, latestV) == release.StatusOutdated:
+				outdatedPlugins++
+				needWork = append(needWork, s)
 			}
-			if outdatedPlugins > 0 {
-				_, _ = fmt.Fprintln(out, "   upgrade everything with: viti upgrade --run")
+			_, _ = fmt.Fprintln(out, pluginStatusLine(s.Name, s.Version, latestV, verr))
+		}
+
+		if upgradeCheck {
+			if showRunHint(status, outdatedPlugins) {
+				_, _ = fmt.Fprintln(out, "   run 'viti upgrade' to upgrade everything")
 			}
 			return nil
 		}
 
-		plan := planRun(status, runtime.GOOS, upgradeNoPlugins, len(states))
+		plan := planRun(status, runtime.GOOS, upgradeNoPlugins, len(needWork))
 		if !plan.installer && !plan.plugins {
 			if plan.windowsHint {
-				return fmt.Errorf("--run is not supported on Windows; copy the command above into PowerShell")
+				return fmt.Errorf("viti cannot replace its own running .exe — copy the installer command above into PowerShell")
 			}
-			_, _ = fmt.Fprintln(out, "nothing to do")
+			_, _ = fmt.Fprintln(out, "✨ everything is up to date — nothing to do")
 			return nil
 		}
 
 		if !upgradeAssume {
-			ok, err := confirm(cmd, bundledPrompt(latest.Tag, plan.installer, len(states)))
+			ok, err := confirm(cmd, bundledPrompt(latest.Tag, plan.installer, len(needWork)))
 			if err != nil {
 				return err
 			}
@@ -110,7 +122,7 @@ Sigstore signature), and the plugins through the same verified path as
 
 		if plan.windowsHint {
 			_, _ = fmt.Fprintln(out,
-				"⚠️  the installer cannot replace a running .exe — upgrade viti itself by copying the command above into PowerShell")
+				"⚠️  the installer cannot replace a running .exe — upgrade viti itself by copying the installer command above into PowerShell")
 		}
 		if plan.installer {
 			if err := runInstaller(cmd, cmdline); err != nil {
@@ -118,7 +130,7 @@ Sigstore signature), and the plugins through the same verified path as
 			}
 		}
 		if plan.plugins {
-			upgraded, current, failed, err := upgradePlugins(cmd, states)
+			upgraded, current, failed, err := upgradePlugins(cmd, needWork)
 			if err != nil {
 				return err
 			}
@@ -132,29 +144,37 @@ Sigstore signature), and the plugins through the same verified path as
 	},
 }
 
-// runPlan is what `viti upgrade --run` will execute. The self and plugin
-// halves are independent: an up-to-date viti still upgrades outdated plugins.
+// runPlan is what `viti upgrade` will execute. The self and plugin halves are
+// independent: an up-to-date viti still upgrades outdated plugins.
 type runPlan struct {
 	// installer runs the curl|bash installer for viti itself.
 	installer bool
 	// windowsHint means viti itself needs upgrading but the installer cannot
 	// replace a running .exe — say so instead of refusing the plugins too.
 	windowsHint bool
-	// plugins runs the all-plugins upgrade pass.
+	// plugins runs the upgrade pass over the plugins that need work.
 	plugins bool
 }
 
-func planRun(status release.Status, goos string, noPlugins bool, pluginCount int) runPlan {
+func planRun(status release.Status, goos string, noPlugins bool, pluginsNeedingWork int) runPlan {
 	needSelf := status == release.StatusOutdated || status == release.StatusDevelopment
 	return runPlan{
 		installer:   needSelf && goos != "windows",
 		windowsHint: needSelf && goos == "windows",
-		plugins:     !noPlugins && pluginCount > 0,
+		plugins:     !noPlugins && pluginsNeedingWork > 0,
 	}
 }
 
-// pluginStatusLine renders one installed plugin's row in check mode. A check
-// that fails (private repo without a token, offline) is reported, not fatal —
+// showRunHint reports whether the --check footer should point at running
+// `viti upgrade`: whenever viti itself or any plugin has an upgrade waiting.
+func showRunHint(status release.Status, outdatedPlugins int) bool {
+	return status == release.StatusOutdated ||
+		status == release.StatusDevelopment ||
+		outdatedPlugins > 0
+}
+
+// pluginStatusLine renders one installed plugin's status row. A check that
+// fails (private repo without a token, offline) is reported, not fatal —
 // being unable to ask is not a failure of "what is installed".
 func pluginStatusLine(name, installed, latest string, err error) string {
 	if err != nil {
@@ -188,7 +208,7 @@ func bundledPrompt(latestTag string, self bool, pluginCount int) string {
 func confirm(cmd *cobra.Command, prompt string) (bool, error) {
 	// Ask the terminal directly rather than inferring from the file mode:
 	// /dev/null is a character device but is nobody's terminal, so a
-	// mode-based check waves `upgrade --run < /dev/null` through and then
+	// mode-based check waves `upgrade --yes < /dev/null` through and then
 	// fails on the read below with a bare "EOF".
 	if in, ok := cmd.InOrStdin().(*os.File); ok && !term.IsTerminal(int(in.Fd())) {
 		return false, fmt.Errorf("stdin is not a terminal; re-run with --yes to confirm non-interactively")
@@ -217,11 +237,17 @@ func runInstaller(cmd *cobra.Command, cmdline string) error {
 }
 
 func init() {
-	upgradeCmd.Flags().BoolVar(&upgradeRun, "run", false,
-		"execute the upgrades after printing what would happen")
+	upgradeCmd.Flags().BoolVar(&upgradeCheck, "check", false,
+		"only report what would be upgraded; change nothing")
 	upgradeCmd.Flags().BoolVarP(&upgradeAssume, "yes", "y", false,
-		"skip the confirmation prompt when used with --run")
+		"skip the confirmation prompt")
 	upgradeCmd.Flags().BoolVar(&upgradeNoPlugins, "no-plugins", false,
 		"only viti itself — leave the installed plugins alone")
+	// v0.0.30 briefly required --run to upgrade; upgrading is the default
+	// now, so the flag survives as a hidden no-op for anything that learned
+	// that syntax.
+	upgradeCmd.Flags().BoolVar(&upgradeRunDeprecated, "run", false, "")
+	_ = upgradeCmd.Flags().MarkDeprecated("run",
+		"upgrading is now the default; use --check for a read-only report")
 	rootCmd.AddCommand(upgradeCmd)
 }

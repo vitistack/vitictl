@@ -88,9 +88,52 @@ func TestBundledPrompt(t *testing.T) {
 	}
 }
 
+// The --check footer must point at `viti upgrade` whenever ANYTHING is
+// outdated — viti itself included. Showing only the curl one-liner when viti
+// is stale (but plugins are current) hides the bundled upgrade from exactly
+// the person it was built for.
+func TestShowRunHint(t *testing.T) {
+	tests := []struct {
+		name            string
+		status          release.Status
+		outdatedPlugins int
+		want            bool
+	}{
+		{"viti outdated, plugins current", release.StatusOutdated, 0, true},
+		{"viti current, one plugin outdated", release.StatusUpToDate, 1, true},
+		{"everything current", release.StatusUpToDate, 0, false},
+		{"development build", release.StatusDevelopment, 0, true},
+		{"ahead of the release", release.StatusAhead, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := showRunHint(tt.status, tt.outdatedPlugins); got != tt.want {
+				t.Errorf("showRunHint(%v, %d) = %v, want %v",
+					tt.status, tt.outdatedPlugins, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestUpgradeHasNoPluginsFlag(t *testing.T) {
 	if upgradeCmd.Flags().Lookup("no-plugins") == nil {
 		t.Fatal("upgrade must offer --no-plugins to keep the self-only behavior")
+	}
+}
+
+// Upgrading is the default now: `viti upgrade` upgrades. --check is the
+// read-only report, and --run survives as a deprecated no-op so anything
+// that learned the v0.0.30 syntax keeps working.
+func TestUpgradeFlagsForUpgradeByDefault(t *testing.T) {
+	if upgradeCmd.Flags().Lookup("check") == nil {
+		t.Fatal("upgrade must offer --check for the read-only report")
+	}
+	run := upgradeCmd.Flags().Lookup("run")
+	if run == nil {
+		t.Fatal("--run must survive as a deprecated no-op")
+	}
+	if run.Deprecated == "" {
+		t.Error("--run should be marked deprecated")
 	}
 }
 
