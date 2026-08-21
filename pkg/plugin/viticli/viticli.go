@@ -27,7 +27,7 @@ var ErrNotInstalled = errors.New("the viti CLI was not found on PATH")
 
 // ErrChildFailed marks a failure the child command already reported on its
 // own stderr — the wrapper's root prints nothing more, only exits non-zero.
-var ErrChildFailed = errors.New("viti kubevirt already reported the failure")
+var ErrChildFailed = errors.New("the child command already reported the failure")
 
 // Streams are the caller's I/O, wired straight through rather than captured:
 // the child command runs interactive pickers and confirmation prompts.
@@ -92,7 +92,7 @@ func classify(ctx context.Context, bin string, childErr error, diagnose Diagnose
 	// with no output at all.
 	var exitErr *exec.ExitError
 	if !errors.As(childErr, &exitErr) || !exitErr.Exited() {
-		return fmt.Errorf("viti kubevirt was terminated before it could report anything: %w", childErr)
+		return fmt.Errorf("the viti command was terminated before it could report anything: %w", childErr)
 	}
 
 	if diagnose != nil {
