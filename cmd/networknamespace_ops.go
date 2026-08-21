@@ -91,7 +91,14 @@ func loadAllZones(ctx context.Context, clients []*kube.Client, namespace string,
 // coverage has to be detectable by exit code, not only by reading stderr.
 // With zero coverage there is no line at all — a clean-sweep broom over an
 // audit that never happened is the worst possible output.
-func auditSummary(orphans, audited, configured int) (line, warning string) {
+//
+// blocked counts listed orphans that `nn delete` would nonetheless refuse.
+// Since a claimed netns is no longer listed at all (netns.Orphans), the only
+// way that happens is unreadable evidence — so the footnote points at
+// investigation rather than at deletion. It is silent when the count is zero,
+// which is the normal case: saying "0 of them are blocked" on every run is the
+// noise this command already sheds elsewhere.
+func auditSummary(orphans, blocked, audited, configured int) (line, warning string) {
 	scope := fmt.Sprintf("%d/%d availability zone(s) audited", audited, configured)
 	switch {
 	case audited == 0:
@@ -102,6 +109,10 @@ func auditSummary(orphans, audited, configured int) (line, warning string) {
 		line = fmt.Sprintf("🧹 no orphaned networknamespaces found (%s)\n", scope)
 	default:
 		line = fmt.Sprintf("\n%d orphan(s), %s. Delete deliberately with: viti nn delete <name>\n", orphans, scope)
+		if blocked > 0 {
+			line += fmt.Sprintf("   %d of them cannot be deleted: evidence about them could not be read, "+
+				"so being unclaimed is unproven. Run with -o json for the records.\n", blocked)
+		}
 	}
 	if audited < configured {
 		warning = fmt.Sprintf("incomplete audit: %d of %d availability zone(s) could not be audited — "+
@@ -161,7 +172,7 @@ automation cannot mistake partial coverage for a clean fleet.`,
 		}
 
 		var found []orphanReport
-		total, audited := 0, 0
+		total, blocked, audited := 0, 0, 0
 		for i, res := range loadAllZones(ctx, clients, nnOrphansNamespace, nnOrphansZoneTimeout) {
 			c := clients[i]
 			if res.err != nil {
@@ -171,7 +182,11 @@ automation cannot mistake partial coverage for a clean fleet.`,
 			audited++
 			for _, o := range netns.Orphans(res.snap) {
 				total++
-				found = append(found, newOrphanReport(c.AZ.Name, o))
+				report := newOrphanReport(c.AZ.Name, o)
+				if !report.Deletable {
+					blocked++
+				}
+				found = append(found, report)
 			}
 		}
 
@@ -187,7 +202,7 @@ automation cannot mistake partial coverage for a clean fleet.`,
 				return err
 			}
 			if audited < len(zones) {
-				_, warning := auditSummary(total, audited, len(zones))
+				_, warning := auditSummary(total, blocked, audited, len(zones))
 				return errors.New(warning)
 			}
 			return nil
@@ -198,7 +213,7 @@ automation cannot mistake partial coverage for a clean fleet.`,
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "networknamespace/%s/%s\n", o.Namespace, o.Name)
 			}
 			if audited < len(zones) {
-				_, warning := auditSummary(total, audited, len(zones))
+				_, warning := auditSummary(total, blocked, audited, len(zones))
 				return errors.New(warning)
 			}
 			return nil
@@ -224,7 +239,7 @@ automation cannot mistake partial coverage for a clean fleet.`,
 
 		// Coverage is reported explicitly: a zone that could not be queried
 		// must never read as a zone with nothing in it.
-		line, warning := auditSummary(total, audited, len(zones))
+		line, warning := auditSummary(total, blocked, audited, len(zones))
 		if line != "" {
 			_, _ = fmt.Fprint(cmd.OutOrStdout(), line)
 		}
@@ -446,6 +461,15 @@ func printBlockingGates(cmd *cobra.Command, namespace string, ev *netns.Evidence
 	}
 	for _, n := range ev.NCRefs {
 		_, _ = fmt.Fprintf(out, "  ❌ NetworkConfiguration still bound: %s/%s\n", namespace, n)
+	}
+	if n := len(ev.NCUnevaluated); n > 0 {
+		_, _ = fmt.Fprintf(out, "  ❌ %d NetworkConfiguration(s) could not be evaluated: %s\n",
+			n, strings.Join(ev.NCUnevaluated, ", "))
+		if !ev.VlanKnown {
+			_, _ = fmt.Fprintf(out, "     this netns has no status.vlanId, so the vlan<id> interface rule\n"+
+				"     cannot run, and these declare no spec.networkNamespaceName — whether\n"+
+				"     they are bound to it is unknown. Check why the netns has no vlan.\n")
+		}
 	}
 	if ev.IPAllocCount > 0 {
 		_, _ = fmt.Fprintf(out, "  ❌ %d IPAllocation(s) still reference it\n", ev.IPAllocCount)
