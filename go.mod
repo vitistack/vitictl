@@ -2,7 +2,7 @@ module github.com/vitistack/vitictl
 
 go 1.27.0
 
-godebug default=go1.26
+godebug default=go1.27
 
 require (
 	github.com/atotto/clipboard v0.1.4
@@ -29,7 +29,7 @@ require (
 	github.com/fxamacker/cbor/v2 v2.9.3 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-openapi/jsonpointer v1.0.0 // indirect
-	github.com/go-openapi/jsonreference v1.0.0 // indirect
+	github.com/go-openapi/jsonreference v1.0.1 // indirect
 	github.com/go-openapi/swag v0.29.1 // indirect
 	github.com/go-openapi/swag/cmdutils v0.29.1 // indirect
 	github.com/go-openapi/swag/conv v0.29.1 // indirect
