@@ -12,10 +12,10 @@ require (
 	github.com/spf13/viper v1.21.0
 	github.com/vitistack/common v0.8.71
 	golang.org/x/term v0.45.0
-	k8s.io/api v0.36.4
+	k8s.io/api v0.37.0
 	k8s.io/apiextensions-apiserver v0.36.4
-	k8s.io/apimachinery v0.36.4
-	k8s.io/client-go v0.36.4
+	k8s.io/apimachinery v0.37.0
+	k8s.io/client-go v0.37.0
 	sigs.k8s.io/controller-runtime v0.24.1
 	sigs.k8s.io/yaml v1.6.0
 )
