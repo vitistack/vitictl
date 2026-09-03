@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	netv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -67,6 +68,11 @@ func TestVerifyPrecleanBlocksOnRemainingResources(t *testing.T) {
 			name: "remaining LoadBalancer Service blocks — its IPAM address is still allocated",
 			objs: []ctrlclient.Object{lbService(testNS, "web")},
 			want: "remaining LoadBalancer service: " + testNS + "/web",
+		},
+		{
+			name: "remaining Ingress blocks — its external cleanup may still be running",
+			objs: []ctrlclient.Object{ingress(testNS, "web")},
+			want: "remaining Ingress: " + testNS + "/web",
 		},
 	}
 
@@ -199,6 +205,60 @@ func TestVerifyPrecleanFailedFlagBlocks(t *testing.T) {
 
 	if err := r.verifyPreclean(t.Context()); err == nil {
 		t.Fatal("verifyPreclean() = nil, want NOT CLEAN — r.failed must block the verdict regardless of what List shows")
+	}
+}
+
+func TestDeleteIngressesBlocksWhenDeletionIsNotComplete(t *testing.T) {
+	sch := testScheme(t, false, true)
+	base := fakeClient(sch, ingress(testNS, "stuck"))
+	guest := interceptor.NewClient(base.(ctrlclient.WithWatch), interceptor.Funcs{
+		Delete: func(_ context.Context, _ ctrlclient.WithWatch, obj ctrlclient.Object, _ ...ctrlclient.DeleteOption) error {
+			if _, ok := obj.(*netv1.Ingress); ok {
+				return nil
+			}
+			return base.Delete(context.Background(), obj)
+		},
+	})
+	r, _ := newTestRunner(t, nil, guest)
+	ctx, cancel := ctxWithCancel(t)
+	cancel()
+
+	r.deleteIngresses(ctx)
+
+	if !r.failed {
+		t.Fatal("an Ingress that remains after an accepted delete must block the preclean verdict")
+	}
+}
+
+func TestDeleteGatewaysFinalizerStripBlocksVerdict(t *testing.T) {
+	sch := testScheme(t, false, true)
+	gw := &unstructured.Unstructured{}
+	gw.SetGroupVersionKind(schema.GroupVersionKind{Group: gatewayListGVK.Group, Version: gatewayListGVK.Version, Kind: "Gateway"})
+	gw.SetNamespace(testNS)
+	gw.SetName("stuck")
+	gw.SetFinalizers([]string{"example.com/external-cleanup"})
+	base := fakeClient(sch, gw)
+	patched := false
+	guest := interceptor.NewClient(base.(ctrlclient.WithWatch), interceptor.Funcs{
+		Delete: func(context.Context, ctrlclient.WithWatch, ctrlclient.Object, ...ctrlclient.DeleteOption) error {
+			return nil
+		},
+		Patch: func(context.Context, ctrlclient.WithWatch, ctrlclient.Object, ctrlclient.Patch, ...ctrlclient.PatchOption) error {
+			patched = true
+			return nil
+		},
+	})
+	r, _ := newTestRunner(t, nil, guest)
+	ctx, cancel := ctxWithCancel(t)
+	cancel()
+
+	r.deleteGateways(ctx)
+
+	if !patched {
+		t.Fatal("test setup did not exercise the Gateway finalizer-strip path")
+	}
+	if !r.failed {
+		t.Fatal("stripping a Gateway finalizer must block the preclean verdict")
 	}
 }
 

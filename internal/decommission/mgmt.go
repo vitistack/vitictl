@@ -40,7 +40,7 @@ func (r *Runner) teardown(ctx context.Context) error {
 			return false, err
 		}
 		for i := range l.Items {
-			if r.hasClusterPrefix(l.Items[i].Name) {
+			if l.Items[i].Spec.ClusterIdentifier == r.clusterID {
 				return false, nil
 			}
 		}
@@ -98,7 +98,7 @@ func (r *Runner) countClusterMachines(ctx context.Context) (int, error) {
 	}
 	n := 0
 	for i := range l.Items {
-		if r.hasClusterPrefix(l.Items[i].Name) {
+		if r.hasClusterNodeName(l.Items[i].Name, false) {
 			n++
 		}
 	}
@@ -118,7 +118,7 @@ func (r *Runner) remainingIPAllocations(ctx context.Context) (leaked []string, c
 		return nil, false
 	}
 	for i := range l.Items {
-		if r.hasClusterPrefix(l.Items[i].GetName()) {
+		if r.hasClusterNodeName(l.Items[i].GetName(), true) {
 			leaked = append(leaked, l.Items[i].GetName())
 		}
 	}

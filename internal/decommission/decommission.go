@@ -14,7 +14,9 @@
 // and by its CSI drivers. Phase 2 runs only after phase 1's verdict is
 // verifiably clean.
 //
-// Finalizers are never stripped anywhere: they ARE the cleanup mechanism.
+// Management-cluster finalizers are never stripped: they ARE the cleanup
+// mechanism. If a stuck guest Gateway finalizer must be stripped, phase 1 is
+// marked NOT CLEAN and phase 2 is blocked.
 //
 // This is a Go port of the operations-drift scripts
 // (scripts/clusterdelete/*.sh), which remain the validated reference.
@@ -143,11 +145,29 @@ func ignoreNotFound(err error) error {
 	return err
 }
 
-// hasClusterPrefix reports whether name belongs to this run's cluster. The
-// clusterId carries a unique random suffix, so prefix matching is
-// collision-safe against similarly named neighbors in the namespace.
-func (r *Runner) hasClusterPrefix(name string) bool {
-	return strings.HasPrefix(name, r.clusterID+"-")
+// hasClusterNodeName reports whether name starts with this exact cluster ID
+// followed by a generated node segment: ctp<N> or wrk<N>. Parsing the segment
+// avoids treating t-a-b-ctp0 as belonging to cluster t-a.
+func (r *Runner) hasClusterNodeName(name string, allowSuffix bool) bool {
+	rest, ok := strings.CutPrefix(name, r.clusterID+"-")
+	if !ok {
+		return false
+	}
+	rest, ok = strings.CutPrefix(rest, "ctp")
+	if !ok {
+		rest, ok = strings.CutPrefix(rest, "wrk")
+	}
+	if !ok {
+		return false
+	}
+	i := 0
+	for i < len(rest) && rest[i] >= '0' && rest[i] <= '9' {
+		i++
+	}
+	if i == 0 {
+		return false
+	}
+	return i == len(rest) || (allowSuffix && i+1 < len(rest) && rest[i] == '-')
 }
 
 // Run executes the full decommission. It returns an error when the run is

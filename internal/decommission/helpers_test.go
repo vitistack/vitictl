@@ -8,6 +8,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	netv1 "k8s.io/api/networking/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -36,7 +37,7 @@ func testScheme(t *testing.T, withIPAlloc, withGateway bool) *runtime.Scheme {
 	t.Helper()
 	sch := runtime.NewScheme()
 	for _, add := range []func(*runtime.Scheme) error{
-		corev1.AddToScheme, appsv1.AddToScheme, storagev1.AddToScheme, vitiv1alpha1.AddToScheme,
+		corev1.AddToScheme, appsv1.AddToScheme, netv1.AddToScheme, storagev1.AddToScheme, vitiv1alpha1.AddToScheme,
 	} {
 		if err := add(sch); err != nil {
 			t.Fatal(err)
@@ -126,6 +127,10 @@ func clusterIPService(ns, name string) *corev1.Service {
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
 		Spec:       corev1.ServiceSpec{Type: corev1.ServiceTypeClusterIP},
 	}
+}
+
+func ingress(ns, name string) *netv1.Ingress {
+	return &netv1.Ingress{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}}
 }
 
 // ctxWithCancel is a convenience for cancellation tests.

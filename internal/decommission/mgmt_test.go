@@ -60,7 +60,7 @@ func TestVerifyTeardown(t *testing.T) {
 			// tool would tell an operator to strip finalizers while a real
 			// VM (and its provider-side resources) still exists.
 			name:       "remaining machine blocks the verdict",
-			objs:       []ctrlclient.Object{machine(testClusterID + "-node-1")},
+			objs:       []ctrlclient.Object{machine(testClusterID + "-ctp0")},
 			wantErr:    true,
 			wantOutput: "machine(s) remain",
 		},
@@ -181,9 +181,9 @@ func TestCountClusterMachines(t *testing.T) {
 		// the delete path, the "declare done too early" hazard.
 		otherClusterID := "t-team-002-cd34"
 		cl := fakeClient(testScheme(t, false, false),
-			machine(testClusterID+"-node-1"),
-			machine(testClusterID+"-node-2"),
-			machine(otherClusterID+"-node-1"),
+			machine(testClusterID+"-ctp0"),
+			machine(testClusterID+"-wrk0"),
+			machine(otherClusterID+"-ctp0"),
 		)
 		r, _ := newTestRunner(t, cl, nil)
 
@@ -272,8 +272,8 @@ func TestRemainingIPAllocations(t *testing.T) {
 
 	t.Run("CRD installed, allocations remain for this cluster: reported as leaks", func(t *testing.T) {
 		cl := fakeClient(testScheme(t, true, false),
-			ipAllocation(testClusterID+"-node-1"),
-			ipAllocation(testClusterID+"-node-2"),
+			ipAllocation(testClusterID+"-ctp0-vlan2100"),
+			ipAllocation(testClusterID+"-wrk0-vlan2100"),
 		)
 		r, _ := newTestRunner(t, cl, nil)
 
@@ -293,7 +293,7 @@ func TestRemainingIPAllocations(t *testing.T) {
 		// legitimate clean verdict or, worse, invite someone to go delete
 		// another cluster's IP records by hand.
 		otherClusterID := "t-team-002-cd34"
-		cl := fakeClient(testScheme(t, true, false), ipAllocation(otherClusterID+"-node-1"))
+		cl := fakeClient(testScheme(t, true, false), ipAllocation(otherClusterID+"-ctp0-vlan2100"))
 		r, _ := newTestRunner(t, cl, nil)
 
 		leaked, checked := r.remainingIPAllocations(t.Context())
