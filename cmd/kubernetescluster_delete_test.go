@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -30,15 +29,15 @@ func TestKCDeleteAndPrecleanAvailabilityZoneFlagsShareGlobalBinding(t *testing.T
 	t.Cleanup(func() { globalAZ = oldAZ })
 	for _, tt := range []struct {
 		name string
-		flag *pflag.Flag
+		set  func(string) error
 	}{
-		{"delete --availabilityzone/-z", deleteAZ},
-		{"preclean --availabilityzone/-z", precleanAZ},
-		{"global --az", aliasAZ},
+		{"delete --availabilityzone/-z", deleteAZ.Value.Set},
+		{"preclean --availabilityzone/-z", precleanAZ.Value.Set},
+		{"global --az", aliasAZ.Value.Set},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			globalAZ = ""
-			if err := tt.flag.Value.Set("zone-a"); err != nil {
+			if err := tt.set("zone-a"); err != nil {
 				t.Fatalf("setting flag: %v", err)
 			}
 			if globalAZ != "zone-a" {
