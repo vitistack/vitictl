@@ -161,9 +161,9 @@ func (r *Runner) deleteIngresses(ctx context.Context) {
 	}
 }
 
-// deleteGateways lets finalizers run — they are how gateway controllers
-// clean up external resources (LB service, IPAM, DNS). Finalizers are
-// stripped only as a last resort on stuck gateways, with a loud warning.
+// deleteGateways lets finalizers run — they are how gateway controllers clean
+// up external resources (LB service, IPAM, DNS). Stuck finalizers are left
+// intact and block phase 2.
 func (r *Runner) deleteGateways(ctx context.Context) {
 	gws := &unstructured.UnstructuredList{}
 	gws.SetGroupVersionKind(gatewayListGVK)
@@ -192,29 +192,7 @@ func (r *Runner) deleteGateways(ctx context.Context) {
 	})
 	if !cleared {
 		r.failed = true
-		r.warnf("some gateways stuck terminating — stripping finalizers as last resort.")
-		r.warnf("external resources owned by these gateways may NOT have been cleaned up — verify manually!")
-		l := &unstructured.UnstructuredList{}
-		l.SetGroupVersionKind(gatewayListGVK)
-		if err := r.guest.List(ctx, l); err == nil {
-			for i := range l.Items {
-				gw := &l.Items[i]
-				patch := []byte(`{"metadata":{"finalizers":[]}}`)
-				if err := r.guest.Patch(ctx, gw, ctrlclient.RawPatch(types.MergePatchType, patch)); err != nil {
-					r.warnf("failed to clear finalizers on gateway %s/%s: %v", gw.GetNamespace(), gw.GetName(), err)
-				}
-			}
-		}
-		if !r.waitUntil(ctx, "gateways cleared (after finalizer strip)", 30*time.Second, 5*time.Second, func(ctx context.Context) (bool, error) {
-			l := &unstructured.UnstructuredList{}
-			l.SetGroupVersionKind(gatewayListGVK)
-			if err := r.guest.List(ctx, l); err != nil {
-				return false, err
-			}
-			return len(l.Items) == 0, nil
-		}) {
-			r.failed = true
-		}
+		r.warnf("some gateways are stuck terminating; their finalizers were left intact because external cleanup is unverified")
 	}
 }
 

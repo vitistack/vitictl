@@ -202,11 +202,39 @@ func TestHasClusterNodeNameRejectsNestedClusterID(t *testing.T) {
 	if r.hasClusterNodeName(nestedNeighbourMachine, false) {
 		t.Fatal("a nested neighbouring cluster ID must not be accepted as this cluster's generated node name")
 	}
+	nestedNeighbourAllocation := "t-a-ctp1-ctp0-vlan2100" // belongs to cluster "t-a-ctp1"
+	if r.hasClusterNodeName(nestedNeighbourAllocation, true) {
+		t.Fatal("an allocation for a neighbouring cluster whose ID contains a node segment must not match")
+	}
+}
+
+func TestOwnsNetworkConfigurationUsesExactIdentity(t *testing.T) {
+	r, _ := newTestRunner(t, nil, nil)
+	r.clusterID = "t-a"
+
+	explicit := &vitiv1alpha1.NetworkConfiguration{}
+	explicit.Name = "unrelated-name"
+	explicit.Spec.ClusterIdentifier = "t-a"
+	if !r.ownsNetworkConfiguration(explicit) {
+		t.Fatal("an exact spec.clusterIdentifier must establish ownership")
+	}
+
+	legacy := &vitiv1alpha1.NetworkConfiguration{}
+	legacy.Name = "t-a-ctp0"
+	if !r.ownsNetworkConfiguration(legacy) {
+		t.Fatal("a legacy NetworkConfiguration with an exact generated node name must match")
+	}
+
+	neighbour := &vitiv1alpha1.NetworkConfiguration{}
+	neighbour.Name = "t-a-b-ctp0"
+	if r.ownsNetworkConfiguration(neighbour) {
+		t.Fatal("a legacy NetworkConfiguration for nested cluster t-a-b must not belong to t-a")
+	}
 }
 
 // --- New -----------------------------------------------------------------
 
-// TestNewRefusesEmptyClusterID: clusterId drives hasClusterPrefix, the
+// TestNewRefusesEmptyClusterID: clusterId drives generated-name matching, the
 // Machine/NetworkConfiguration deletion filter, and the cpvip/IPAllocation
 // lookups by name. An empty clusterId would match everything (empty-string
 // prefix) or nothing meaningful — New must refuse outright rather than let

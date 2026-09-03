@@ -78,20 +78,7 @@ NOT cleaned then. Pass --yes to skip the confirmation prompt.`,
 			return err
 		}
 
-		var guest ctrlclient.Client
-		if !kcDeleteSkipPreclean {
-			guest, err = buildGuestClient(ctx, hit)
-			if err != nil {
-				return fmt.Errorf("cannot reach the guest cluster for preclean: %w\n"+
-					"If the guest is genuinely gone/unreachable and you accept leaking its external state, re-run with --skip-preclean", err)
-			}
-		}
-
-		runner, err := decommission.New(hit.client.Ctrl, guest, hit.cluster, decommission.Options{
-			Out:            cmd.OutOrStdout(),
-			SkipPreclean:   kcDeleteSkipPreclean,
-			MachineTimeout: kcDeleteMachineTimeout,
-		})
+		runner, err := newKCDeleteRunner(ctx, cmd, hit)
 		if err != nil {
 			return err
 		}
@@ -114,6 +101,23 @@ NOT cleaned then. Pass --yes to skip the confirmation prompt.`,
 		printNetNSAdvisory(ctx, cmd, hit)
 		return nil
 	},
+}
+
+func newKCDeleteRunner(ctx context.Context, cmd *cobra.Command, hit *kcHit) (*decommission.Runner, error) {
+	var guest ctrlclient.Client
+	var err error
+	if !kcDeleteSkipPreclean {
+		guest, err = buildGuestClient(ctx, hit)
+		if err != nil {
+			return nil, fmt.Errorf("cannot reach the guest cluster for preclean: %w\n"+
+				"If the guest is genuinely gone/unreachable and you accept leaking its external state, re-run with --skip-preclean", err)
+		}
+	}
+	return decommission.New(hit.client.Ctrl, guest, hit.cluster, decommission.Options{
+		Out:            cmd.OutOrStdout(),
+		SkipPreclean:   kcDeleteSkipPreclean,
+		MachineTimeout: kcDeleteMachineTimeout,
+	})
 }
 
 // printNetNSAdvisory tells the operator when the deleted cluster's

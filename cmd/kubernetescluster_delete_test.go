@@ -4,7 +4,15 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	vitiv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
+	"github.com/vitistack/vitictl/internal/kube"
 )
 
 func TestKCDeleteAndPrecleanAvailabilityZoneFlagsShareGlobalBinding(t *testing.T) {
@@ -46,5 +54,39 @@ func TestKCDeleteDryRunHelpDoesNotPromiseUnverifiedRORChecks(t *testing.T) {
 		if strings.Contains(strings.ToLower(usage), unsupported) {
 			t.Errorf("dry-run help %q must not promise an unimplemented ROR %s check", usage, unsupported)
 		}
+	}
+}
+
+func TestKCDeleteDryRunGuestSetupFailureIsFatal(t *testing.T) {
+	sch := runtime.NewScheme()
+	if err := scheme.AddToScheme(sch); err != nil {
+		t.Fatal(err)
+	}
+	if err := vitiv1alpha1.AddToScheme(sch); err != nil {
+		t.Fatal(err)
+	}
+	cluster := &vitiv1alpha1.KubernetesCluster{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "cluster-a"},
+	}
+	cluster.Spec.Cluster.ClusterId = "cluster-a-id"
+	hit := &kcHit{
+		client:  &kube.Client{Ctrl: fake.NewClientBuilder().WithScheme(sch).Build()},
+		cluster: cluster,
+	}
+	cmd := &cobra.Command{}
+	var out strings.Builder
+	cmd.SetOut(&out)
+
+	oldDryRun, oldSkip := kcDeleteDryRun, kcDeleteSkipPreclean
+	kcDeleteDryRun, kcDeleteSkipPreclean = true, false
+	t.Cleanup(func() {
+		kcDeleteDryRun, kcDeleteSkipPreclean = oldDryRun, oldSkip
+	})
+
+	if _, err := newKCDeleteRunner(t.Context(), cmd, hit); err == nil {
+		t.Fatal("dry-run guest setup failure must return an error")
+	}
+	if strings.Contains(out.String(), "preflight clean") {
+		t.Fatalf("output = %q, must not print a clean verdict after guest setup fails", out.String())
 	}
 }

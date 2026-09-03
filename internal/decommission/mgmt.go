@@ -40,7 +40,7 @@ func (r *Runner) teardown(ctx context.Context) error {
 			return false, err
 		}
 		for i := range l.Items {
-			if l.Items[i].Spec.ClusterIdentifier == r.clusterID {
+			if r.ownsNetworkConfiguration(&l.Items[i]) {
 				return false, nil
 			}
 		}
@@ -103,6 +103,21 @@ func (r *Runner) countClusterMachines(ctx context.Context) (int, error) {
 		}
 	}
 	return n, nil
+}
+
+func (r *Runner) ownsNetworkConfiguration(nc *vitiv1alpha1.NetworkConfiguration) bool {
+	if nc.Spec.ClusterIdentifier != "" {
+		return nc.Spec.ClusterIdentifier == r.clusterID
+	}
+	if r.hasClusterNodeName(nc.Name, false) || r.hasClusterNodeName(nc.Spec.Name, false) {
+		return true
+	}
+	for _, owner := range nc.OwnerReferences {
+		if owner.Kind == "Machine" && r.hasClusterNodeName(owner.Name, false) {
+			return true
+		}
+	}
+	return false
 }
 
 // remainingIPAllocations returns the cluster's leftover IPAllocation names.

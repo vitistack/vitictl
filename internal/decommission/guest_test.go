@@ -230,7 +230,7 @@ func TestDeleteIngressesBlocksWhenDeletionIsNotComplete(t *testing.T) {
 	}
 }
 
-func TestDeleteGatewaysFinalizerStripBlocksVerdict(t *testing.T) {
+func TestDeleteGatewaysNeverStripsFinalizersAndBlocksVerdict(t *testing.T) {
 	sch := testScheme(t, false, true)
 	gw := &unstructured.Unstructured{}
 	gw.SetGroupVersionKind(schema.GroupVersionKind{Group: gatewayListGVK.Group, Version: gatewayListGVK.Version, Kind: "Gateway"})
@@ -254,11 +254,11 @@ func TestDeleteGatewaysFinalizerStripBlocksVerdict(t *testing.T) {
 
 	r.deleteGateways(ctx)
 
-	if !patched {
-		t.Fatal("test setup did not exercise the Gateway finalizer-strip path")
+	if patched {
+		t.Fatal("Gateway finalizers must never be stripped when external cleanup is unverified")
 	}
 	if !r.failed {
-		t.Fatal("stripping a Gateway finalizer must block the preclean verdict")
+		t.Fatal("a Gateway stuck behind a finalizer must block the preclean verdict")
 	}
 }
 
