@@ -3,6 +3,7 @@ package decommission
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -76,9 +77,11 @@ func (r *Runner) teardown(ctx context.Context) error {
 	// NetworkNamespace's status summary is NOT reliable (goes stale after
 	// deletion — known cosmetic operator bug) and is deliberately ignored.
 	// The CRD only exists where the static-ip-operator is rolled out.
-	leaked, checked := r.remainingIPAllocations(ctx)
+	leaked, supported, err := r.remainingIPAllocations(ctx)
 	switch {
-	case !checked:
+	case err != nil:
+		r.failf("could not verify IPAllocations: %v", err)
+	case !supported:
 		r.printf("  IPAllocation CRD not installed on this zone (static IP allocation not enabled here) — node-IP check skipped")
 	case len(leaked) > 0:
 		for _, name := range leaked {
@@ -98,8 +101,11 @@ func (r *Runner) countClusterMachines(ctx context.Context) (int, error) {
 	}
 	n := 0
 	for i := range l.Items {
-		if r.hasClusterNodeName(l.Items[i].Name, false) {
+		name := l.Items[i].Name
+		if r.hasClusterNodeName(name, false) {
 			n++
+		} else if strings.HasPrefix(name, r.clusterID+"-") {
+			return -1, fmt.Errorf("machine %q starts with clusterId %q but has an unknown name shape; ownership cannot be verified", name, r.clusterID)
 		}
 	}
 	return n, nil
@@ -121,23 +127,25 @@ func (r *Runner) ownsNetworkConfiguration(nc *vitiv1alpha1.NetworkConfiguration)
 }
 
 // remainingIPAllocations returns the cluster's leftover IPAllocation names.
-// checked is false when the CRD is not installed on this zone.
-func (r *Runner) remainingIPAllocations(ctx context.Context) (leaked []string, checked bool) {
+// supported is false only when the CRD is not installed on this zone.
+func (r *Runner) remainingIPAllocations(ctx context.Context) (leaked []string, supported bool, err error) {
 	l := &unstructured.UnstructuredList{}
 	l.SetGroupVersionKind(kube.IPAllocationListGVK)
-	if err := r.mgmt.List(ctx, l, ctrlclient.InNamespace(r.namespace)); err != nil {
-		if meta.IsNoMatchError(err) {
-			return nil, false // CRD absent: static IP allocation is not enabled on this zone
+	if listErr := r.mgmt.List(ctx, l, ctrlclient.InNamespace(r.namespace)); listErr != nil {
+		if meta.IsNoMatchError(listErr) {
+			return nil, false, nil // CRD absent: static IP allocation is not enabled on this zone
 		}
-		r.warnf("could not verify IPAllocations: %v", err)
-		return nil, false
+		return nil, true, listErr
 	}
 	for i := range l.Items {
-		if r.hasClusterNodeName(l.Items[i].GetName(), true) {
-			leaked = append(leaked, l.Items[i].GetName())
+		name := l.Items[i].GetName()
+		if r.hasClusterNodeName(name, true) {
+			leaked = append(leaked, name)
+		} else if strings.HasPrefix(name, r.clusterID+"-") {
+			return nil, true, fmt.Errorf("IPAllocation %q starts with clusterId %q but has an unknown name shape; ownership cannot be verified", name, r.clusterID)
 		}
 	}
-	return leaked, true
+	return leaked, true, nil
 }
 
 // verifyTeardown re-checks everything and renders the final verdict.

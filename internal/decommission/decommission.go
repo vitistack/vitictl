@@ -72,18 +72,39 @@ type Runner struct {
 	// failed accumulates non-fatal problems; any true blocks the verdict.
 	failed bool
 
-	ror *rorPurge
+	ror        *rorPurge
+	guestError error
 }
 
 // New builds a Runner. guest may be nil only when opts.SkipPreclean is set.
 func New(mgmt, guest ctrlclient.Client, cluster *vitiv1alpha1.KubernetesCluster, opts Options) (*Runner, error) {
+	r, err := newRunner(mgmt, guest, cluster, opts)
+	if err != nil {
+		return nil, err
+	}
+	if guest == nil && !r.opts.SkipPreclean {
+		return nil, fmt.Errorf("no guest client and preclean not skipped")
+	}
+	return r, nil
+}
+
+// NewPreflight builds a dry-run Runner. Unlike New, it accepts a nil guest
+// client so Preflight can report that failure alongside management-side
+// prerequisite checks.
+func NewPreflight(mgmt, guest ctrlclient.Client, cluster *vitiv1alpha1.KubernetesCluster, opts Options, guestErr error) (*Runner, error) {
+	r, err := newRunner(mgmt, guest, cluster, opts)
+	if err != nil {
+		return nil, err
+	}
+	r.guestError = guestErr
+	return r, nil
+}
+
+func newRunner(mgmt, guest ctrlclient.Client, cluster *vitiv1alpha1.KubernetesCluster, opts Options) (*Runner, error) {
 	if cluster.Spec.Cluster.ClusterId == "" {
 		return nil, fmt.Errorf("cluster %s/%s has no clusterId — refusing to proceed", cluster.Namespace, cluster.Name)
 	}
 	o := opts.withDefaults()
-	if guest == nil && !o.SkipPreclean {
-		return nil, fmt.Errorf("no guest client and preclean not skipped")
-	}
 	return &Runner{
 		opts:      o,
 		mgmt:      mgmt,

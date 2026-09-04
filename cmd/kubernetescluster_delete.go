@@ -105,19 +105,23 @@ NOT cleaned then. Pass --yes to skip the confirmation prompt.`,
 
 func newKCDeleteRunner(ctx context.Context, cmd *cobra.Command, hit *kcHit) (*decommission.Runner, error) {
 	var guest ctrlclient.Client
-	var err error
+	var guestErr error
 	if !kcDeleteSkipPreclean {
-		guest, err = buildGuestClient(ctx, hit)
-		if err != nil {
+		guest, guestErr = buildGuestClient(ctx, hit)
+		if guestErr != nil && !kcDeleteDryRun {
 			return nil, fmt.Errorf("cannot reach the guest cluster for preclean: %w\n"+
-				"If the guest is genuinely gone/unreachable and you accept leaking its external state, re-run with --skip-preclean", err)
+				"If the guest is genuinely gone/unreachable and you accept leaking its external state, re-run with --skip-preclean", guestErr)
 		}
 	}
-	return decommission.New(hit.client.Ctrl, guest, hit.cluster, decommission.Options{
+	opts := decommission.Options{
 		Out:            cmd.OutOrStdout(),
 		SkipPreclean:   kcDeleteSkipPreclean,
 		MachineTimeout: kcDeleteMachineTimeout,
-	})
+	}
+	if kcDeleteDryRun {
+		return decommission.NewPreflight(hit.client.Ctrl, guest, hit.cluster, opts, guestErr)
+	}
+	return decommission.New(hit.client.Ctrl, guest, hit.cluster, opts)
 }
 
 // printNetNSAdvisory tells the operator when the deleted cluster's
@@ -291,7 +295,6 @@ func confirmKcDelete(cmd *cobra.Command, name string) error {
 }
 
 func init() {
-	kcDeleteCmd.Flags().StringVarP(&globalAZ, "availabilityzone", "z", "", "restrict the search to a single availability zone")
 	kcDeleteCmd.Flags().StringVarP(&kcDeleteNamespace, "namespace", "n", "", "namespace of the KubernetesCluster")
 	kcDeleteCmd.Flags().BoolVar(&kcDeleteYes, "yes", false, "skip the confirmation prompt")
 	kcDeleteCmd.Flags().BoolVar(&kcDeleteSkipPreclean, "skip-preclean", false,
@@ -300,7 +303,6 @@ func init() {
 	kcDeleteCmd.Flags().BoolVar(&kcDeleteDryRun, "dry-run", false,
 		"verify CR, machines, guest reachability, ROR identity, and the ROR plugin without changing anything")
 
-	kcPrecleanCmd.Flags().StringVarP(&globalAZ, "availabilityzone", "z", "", "restrict the search to a single availability zone")
 	kcPrecleanCmd.Flags().StringVarP(&kcPrecleanNamespace, "namespace", "n", "", "namespace of the KubernetesCluster")
 	kcPrecleanCmd.Flags().BoolVar(&kcPrecleanYes, "yes", false, "skip the confirmation prompt")
 

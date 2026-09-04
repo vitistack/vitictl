@@ -15,14 +15,18 @@ import (
 )
 
 func TestKCDeleteAndPrecleanAvailabilityZoneFlagsShareGlobalBinding(t *testing.T) {
-	deleteAZ := kcDeleteCmd.Flags().Lookup("availabilityzone")
-	precleanAZ := kcPrecleanCmd.Flags().Lookup("availabilityzone")
+	deleteAZ := kcDeleteCmd.Flag("availabilityzone")
+	precleanAZ := kcPrecleanCmd.Flag("availabilityzone")
+	rootAZ := rootCmd.PersistentFlags().Lookup("availabilityzone")
 	aliasAZ := rootCmd.PersistentFlags().Lookup("az")
-	if deleteAZ == nil || precleanAZ == nil || aliasAZ == nil {
+	if deleteAZ == nil || precleanAZ == nil || rootAZ == nil || aliasAZ == nil {
 		t.Fatal("delete, preclean, and global --az flags must all be registered")
 	}
 	if deleteAZ.Shorthand != "z" || precleanAZ.Shorthand != "z" {
 		t.Fatal("delete and preclean availability-zone flags must retain the -z shorthand")
+	}
+	if kcDeleteCmd.Flags().Lookup("availabilityzone") != nil || kcPrecleanCmd.Flags().Lookup("availabilityzone") != nil {
+		t.Fatal("delete and preclean must inherit --availabilityzone rather than shadowing the global flag")
 	}
 
 	oldAZ := globalAZ
@@ -31,8 +35,7 @@ func TestKCDeleteAndPrecleanAvailabilityZoneFlagsShareGlobalBinding(t *testing.T
 		name string
 		set  func(string) error
 	}{
-		{"delete --availabilityzone/-z", deleteAZ.Value.Set},
-		{"preclean --availabilityzone/-z", precleanAZ.Value.Set},
+		{"global --availabilityzone/-z", rootAZ.Value.Set},
 		{"global --az", aliasAZ.Value.Set},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -69,7 +72,7 @@ func TestKCDeleteDryRunGuestSetupFailureIsFatal(t *testing.T) {
 	}
 	cluster.Spec.Cluster.ClusterId = "cluster-a-id"
 	hit := &kcHit{
-		client:  &kube.Client{Ctrl: fake.NewClientBuilder().WithScheme(sch).Build()},
+		client:  &kube.Client{Ctrl: fake.NewClientBuilder().WithScheme(sch).WithObjects(cluster).Build()},
 		cluster: cluster,
 	}
 	cmd := &cobra.Command{}
@@ -82,10 +85,20 @@ func TestKCDeleteDryRunGuestSetupFailureIsFatal(t *testing.T) {
 		kcDeleteDryRun, kcDeleteSkipPreclean = oldDryRun, oldSkip
 	})
 
-	if _, err := newKCDeleteRunner(t.Context(), cmd, hit); err == nil {
-		t.Fatal("dry-run guest setup failure must return an error")
+	runner, err := newKCDeleteRunner(t.Context(), cmd, hit)
+	if err != nil {
+		t.Fatalf("dry-run runner setup = %v, want Preflight to aggregate the failure", err)
 	}
-	if strings.Contains(out.String(), "preflight clean") {
-		t.Fatalf("output = %q, must not print a clean verdict after guest setup fails", out.String())
+	if err := runner.Preflight(t.Context()); err == nil {
+		t.Fatal("dry-run guest setup failure must make preflight return an error")
+	}
+	got := out.String()
+	for _, want := range []string{"KubernetesCluster team-a/cluster-a", "machines: 0 found", "guest client unavailable"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output = %q, want aggregate check %q", got, want)
+		}
+	}
+	if strings.Contains(got, "preflight clean") {
+		t.Fatalf("output = %q, must not print a clean verdict after guest setup fails", got)
 	}
 }
