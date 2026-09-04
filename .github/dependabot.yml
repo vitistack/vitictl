@@ -15,6 +15,10 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      kubernetes:
+        patterns:
+          - "k8s.io/*"
     open-pull-requests-limit: 10
     labels:
       - "dependencies"
