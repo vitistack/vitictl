@@ -150,11 +150,20 @@ func (r *Runner) deleteIngresses(ctx context.Context) {
 			r.failf("failed to delete ingress %s/%s: %v", ing.Namespace, ing.Name, err)
 		}
 	}
+	if !r.waitUntil(ctx, "ingresses cleared", 120*time.Second, 5*time.Second, func(ctx context.Context) (bool, error) {
+		var l netv1.IngressList
+		if err := r.guest.List(ctx, &l); err != nil {
+			return false, err
+		}
+		return len(l.Items) == 0, nil
+	}) {
+		r.failed = true
+	}
 }
 
-// deleteGateways lets finalizers run — they are how gateway controllers
-// clean up external resources (LB service, IPAM, DNS). Finalizers are
-// stripped only as a last resort on stuck gateways, with a loud warning.
+// deleteGateways lets finalizers run — they are how gateway controllers clean
+// up external resources (LB service, IPAM, DNS). Stuck finalizers are left
+// intact and block phase 2.
 func (r *Runner) deleteGateways(ctx context.Context) {
 	gws := &unstructured.UnstructuredList{}
 	gws.SetGroupVersionKind(gatewayListGVK)
@@ -182,29 +191,8 @@ func (r *Runner) deleteGateways(ctx context.Context) {
 		return len(l.Items) == 0, nil
 	})
 	if !cleared {
-		r.warnf("some gateways stuck terminating — stripping finalizers as last resort.")
-		r.warnf("external resources owned by these gateways may NOT have been cleaned up — verify manually!")
-		l := &unstructured.UnstructuredList{}
-		l.SetGroupVersionKind(gatewayListGVK)
-		if err := r.guest.List(ctx, l); err == nil {
-			for i := range l.Items {
-				gw := &l.Items[i]
-				patch := []byte(`{"metadata":{"finalizers":[]}}`)
-				if err := r.guest.Patch(ctx, gw, ctrlclient.RawPatch(types.MergePatchType, patch)); err != nil {
-					r.warnf("failed to clear finalizers on gateway %s/%s: %v", gw.GetNamespace(), gw.GetName(), err)
-				}
-			}
-		}
-		if !r.waitUntil(ctx, "gateways cleared (after finalizer strip)", 30*time.Second, 5*time.Second, func(ctx context.Context) (bool, error) {
-			l := &unstructured.UnstructuredList{}
-			l.SetGroupVersionKind(gatewayListGVK)
-			if err := r.guest.List(ctx, l); err != nil {
-				return false, err
-			}
-			return len(l.Items) == 0, nil
-		}) {
-			r.failed = true
-		}
+		r.failed = true
+		r.warnf("some gateways are stuck terminating; their finalizers were left intact because external cleanup is unverified")
 	}
 }
 
@@ -436,6 +424,14 @@ func (r *Runner) deletePVCsAndWaitVolumes(ctx context.Context) {
 func (r *Runner) verifyPreclean(ctx context.Context) error {
 	var problems []string
 
+	var ingresses netv1.IngressList
+	if err := r.guest.List(ctx, &ingresses); err != nil {
+		problems = append(problems, fmt.Sprintf("cannot verify ingresses: %v", err))
+	} else {
+		for i := range ingresses.Items {
+			problems = append(problems, "remaining Ingress: "+ingresses.Items[i].Namespace+"/"+ingresses.Items[i].Name)
+		}
+	}
 	var pvcs corev1.PersistentVolumeClaimList
 	if err := r.guest.List(ctx, &pvcs); err != nil {
 		problems = append(problems, fmt.Sprintf("cannot verify PVCs: %v", err))

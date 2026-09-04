@@ -60,7 +60,7 @@ func TestVerifyTeardown(t *testing.T) {
 			// tool would tell an operator to strip finalizers while a real
 			// VM (and its provider-side resources) still exists.
 			name:       "remaining machine blocks the verdict",
-			objs:       []ctrlclient.Object{machine(testClusterID + "-node-1")},
+			objs:       []ctrlclient.Object{machine(testClusterID + "-ctp0")},
 			wantErr:    true,
 			wantOutput: "machine(s) remain",
 		},
@@ -181,9 +181,9 @@ func TestCountClusterMachines(t *testing.T) {
 		// the delete path, the "declare done too early" hazard.
 		otherClusterID := "t-team-002-cd34"
 		cl := fakeClient(testScheme(t, false, false),
-			machine(testClusterID+"-node-1"),
-			machine(testClusterID+"-node-2"),
-			machine(otherClusterID+"-node-1"),
+			machine(testClusterID+"-ctp0"),
+			machine(testClusterID+"-wrk0"),
+			machine(otherClusterID+"-ctp0"),
 		)
 		r, _ := newTestRunner(t, cl, nil)
 
@@ -205,6 +205,23 @@ func TestCountClusterMachines(t *testing.T) {
 
 		if err != nil || n != 0 {
 			t.Fatalf("want (0, nil), got (%d, %v)", n, err)
+		}
+	})
+
+	t.Run("unknown prefixed machine shape fails closed", func(t *testing.T) {
+		cl := fakeClient(testScheme(t, false, false), machine(testClusterID+"-node-1"))
+		r, _ := newTestRunner(t, cl, nil)
+
+		n, err := r.countClusterMachines(t.Context())
+
+		if err == nil {
+			t.Fatal("an unknown machine shape sharing the cluster prefix must be unverifiable")
+		}
+		if n >= 0 {
+			t.Fatalf("want a negative count on ambiguous ownership, got %d", n)
+		}
+		if !strings.Contains(err.Error(), "ownership cannot be verified") {
+			t.Fatalf("error = %v, want explicit ownership failure", err)
 		}
 	})
 
@@ -257,10 +274,13 @@ func TestRemainingIPAllocations(t *testing.T) {
 		}).Build()
 		r, out := newTestRunner(t, cl, nil)
 
-		leaked, checked := r.remainingIPAllocations(t.Context())
+		leaked, supported, err := r.remainingIPAllocations(t.Context())
 
-		if checked {
-			t.Fatal("checked must be false when the CRD is not installed")
+		if supported {
+			t.Fatal("supported must be false when the CRD is not installed")
+		}
+		if err != nil {
+			t.Fatalf("CRD absence must not be an error: %v", err)
 		}
 		if leaked != nil {
 			t.Fatalf("no leak must be reported when unchecked, got %v", leaked)
@@ -272,15 +292,15 @@ func TestRemainingIPAllocations(t *testing.T) {
 
 	t.Run("CRD installed, allocations remain for this cluster: reported as leaks", func(t *testing.T) {
 		cl := fakeClient(testScheme(t, true, false),
-			ipAllocation(testClusterID+"-node-1"),
-			ipAllocation(testClusterID+"-node-2"),
+			ipAllocation(testClusterID+"-ctp0-vlan2100"),
+			ipAllocation(testClusterID+"-wrk0-vlan2100"),
 		)
 		r, _ := newTestRunner(t, cl, nil)
 
-		leaked, checked := r.remainingIPAllocations(t.Context())
+		leaked, supported, err := r.remainingIPAllocations(t.Context())
 
-		if !checked {
-			t.Fatal("checked must be true when the CRD is installed and the query succeeds")
+		if !supported || err != nil {
+			t.Fatalf("want supported clean query, got supported=%v err=%v", supported, err)
 		}
 		if len(leaked) != 2 {
 			t.Fatalf("want 2 leaked allocations, got %v", leaked)
@@ -293,38 +313,55 @@ func TestRemainingIPAllocations(t *testing.T) {
 		// legitimate clean verdict or, worse, invite someone to go delete
 		// another cluster's IP records by hand.
 		otherClusterID := "t-team-002-cd34"
-		cl := fakeClient(testScheme(t, true, false), ipAllocation(otherClusterID+"-node-1"))
+		cl := fakeClient(testScheme(t, true, false), ipAllocation(otherClusterID+"-ctp0-vlan2100"))
 		r, _ := newTestRunner(t, cl, nil)
 
-		leaked, checked := r.remainingIPAllocations(t.Context())
+		leaked, supported, err := r.remainingIPAllocations(t.Context())
 
-		if !checked {
-			t.Fatal("checked must be true")
+		if !supported || err != nil {
+			t.Fatalf("want supported clean query, got supported=%v err=%v", supported, err)
 		}
 		if len(leaked) != 0 {
 			t.Fatalf("want no leaks reported for another cluster's allocations, got %v", leaked)
 		}
 	})
 
-	t.Run("generic List error: not checked, warned, never a silent no-leak", func(t *testing.T) {
+	t.Run("unknown prefixed allocation shape fails closed", func(t *testing.T) {
+		cl := fakeClient(testScheme(t, true, false), ipAllocation(testClusterID+"-node-1"))
+		r, _ := newTestRunner(t, cl, nil)
+
+		leaked, supported, err := r.remainingIPAllocations(t.Context())
+
+		if !supported {
+			t.Fatal("the CRD is installed")
+		}
+		if err == nil || !strings.Contains(err.Error(), "ownership cannot be verified") {
+			t.Fatalf("error = %v, want explicit ownership failure", err)
+		}
+		if leaked != nil {
+			t.Fatalf("ambiguous allocations must not be claimed as leaks, got %v", leaked)
+		}
+	})
+
+	t.Run("generic List error is returned, never a silent no-leak", func(t *testing.T) {
 		sch := testScheme(t, true, false)
 		cl := fake.NewClientBuilder().WithScheme(sch).WithInterceptorFuncs(interceptor.Funcs{
 			List: func(ctx context.Context, c ctrlclient.WithWatch, list ctrlclient.ObjectList, opts ...ctrlclient.ListOption) error {
 				return errors.New("apiserver timeout")
 			},
 		}).Build()
-		r, out := newTestRunner(t, cl, nil)
+		r, _ := newTestRunner(t, cl, nil)
 
-		leaked, checked := r.remainingIPAllocations(t.Context())
+		leaked, supported, err := r.remainingIPAllocations(t.Context())
 
-		if checked {
-			t.Fatal("checked must be false on a generic query error")
+		if !supported {
+			t.Fatal("a generic API error is distinct from an unsupported CRD")
 		}
 		if leaked != nil {
 			t.Fatalf("no leak must be claimed on a generic query error, got %v", leaked)
 		}
-		if !strings.Contains(out.String(), "could not verify IPAllocations") {
-			t.Fatalf("a generic error must produce a visible warning, got:\n%s", out.String())
+		if err == nil || !strings.Contains(err.Error(), "apiserver timeout") {
+			t.Fatalf("a generic query error must be returned, got %v", err)
 		}
 	})
 }

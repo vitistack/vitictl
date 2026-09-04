@@ -41,7 +41,11 @@ func (r *Runner) Preflight(ctx context.Context) error {
 	if r.opts.SkipPreclean {
 		note("preclean will be SKIPPED — guest checks not performed; external state (IPAM, DNS, volumes, ROR) will leak")
 	} else if r.guest == nil {
-		fail("guest client unavailable (kubeconfig secret missing or unparsable)")
+		if r.guestError != nil {
+			fail("guest client unavailable: %v", r.guestError)
+		} else {
+			fail("guest client unavailable (kubeconfig secret missing or unparsable)")
+		}
 	} else {
 		gctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()

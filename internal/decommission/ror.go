@@ -10,6 +10,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -48,14 +49,18 @@ type rorPurge struct {
 func (r *Runner) startRORPurge(ctx context.Context) {
 	var ns corev1.Namespace
 	if err := r.guest.Get(ctx, ctrlclient.ObjectKey{Name: "nhn-ror"}, &ns); err != nil {
-		r.printf("No nhn-ror namespace found, skipping ROR steps")
+		if apierrors.IsNotFound(err) {
+			r.printf("No nhn-ror namespace found, skipping ROR steps")
+		} else {
+			r.failf("could not check for nhn-ror namespace — ROR purge cannot be verified: %v", err)
+		}
 		return
 	}
 	r.printf("Stop ROR cluster agents (starts the ROR inactivity clock)")
 
 	var secret corev1.Secret
 	if err := r.guest.Get(ctx, ctrlclient.ObjectKey{Namespace: "nhn-ror", Name: "ror-apikey"}, &secret); err != nil {
-		r.warnf("could not read secret nhn-ror/ror-apikey — ROR purge will be skipped: %v", err)
+		r.failf("could not read secret nhn-ror/ror-apikey — ROR purge cannot be verified: %v", err)
 		return
 	}
 	clusterID := string(secret.Data["CLUSTER_ID"])

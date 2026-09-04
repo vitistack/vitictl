@@ -14,7 +14,7 @@
 // and by its CSI drivers. Phase 2 runs only after phase 1's verdict is
 // verifiably clean.
 //
-// Finalizers are never stripped anywhere: they ARE the cleanup mechanism.
+// Finalizers are never stripped: they ARE the cleanup mechanism.
 //
 // This is a Go port of the operations-drift scripts
 // (scripts/clusterdelete/*.sh), which remain the validated reference.
@@ -72,18 +72,39 @@ type Runner struct {
 	// failed accumulates non-fatal problems; any true blocks the verdict.
 	failed bool
 
-	ror *rorPurge
+	ror        *rorPurge
+	guestError error
 }
 
 // New builds a Runner. guest may be nil only when opts.SkipPreclean is set.
 func New(mgmt, guest ctrlclient.Client, cluster *vitiv1alpha1.KubernetesCluster, opts Options) (*Runner, error) {
+	r, err := newRunner(mgmt, guest, cluster, opts)
+	if err != nil {
+		return nil, err
+	}
+	if guest == nil && !r.opts.SkipPreclean {
+		return nil, fmt.Errorf("no guest client and preclean not skipped")
+	}
+	return r, nil
+}
+
+// NewPreflight builds a dry-run Runner. Unlike New, it accepts a nil guest
+// client so Preflight can report that failure alongside management-side
+// prerequisite checks.
+func NewPreflight(mgmt, guest ctrlclient.Client, cluster *vitiv1alpha1.KubernetesCluster, opts Options, guestErr error) (*Runner, error) {
+	r, err := newRunner(mgmt, guest, cluster, opts)
+	if err != nil {
+		return nil, err
+	}
+	r.guestError = guestErr
+	return r, nil
+}
+
+func newRunner(mgmt, guest ctrlclient.Client, cluster *vitiv1alpha1.KubernetesCluster, opts Options) (*Runner, error) {
 	if cluster.Spec.Cluster.ClusterId == "" {
 		return nil, fmt.Errorf("cluster %s/%s has no clusterId — refusing to proceed", cluster.Namespace, cluster.Name)
 	}
 	o := opts.withDefaults()
-	if guest == nil && !o.SkipPreclean {
-		return nil, fmt.Errorf("no guest client and preclean not skipped")
-	}
 	return &Runner{
 		opts:      o,
 		mgmt:      mgmt,
@@ -143,11 +164,23 @@ func ignoreNotFound(err error) error {
 	return err
 }
 
-// hasClusterPrefix reports whether name belongs to this run's cluster. The
-// clusterId carries a unique random suffix, so prefix matching is
-// collision-safe against similarly named neighbors in the namespace.
-func (r *Runner) hasClusterPrefix(name string) bool {
-	return strings.HasPrefix(name, r.clusterID+"-")
+// hasClusterNodeName reports whether name contains a generated node segment,
+// ctp<N> or wrk<N>, owned by this exact cluster ID. Parsing from the right
+// avoids treating t-a-ctp1-ctp0 as belonging to cluster t-a.
+func (r *Runner) hasClusterNodeName(name string, allowSuffix bool) bool {
+	i := max(strings.LastIndex(name, "-ctp"), strings.LastIndex(name, "-wrk"))
+	if i <= 0 {
+		return false
+	}
+	rest := name[i+4:]
+	n := 0
+	for n < len(rest) && rest[n] >= '0' && rest[n] <= '9' {
+		n++
+	}
+	if n == 0 || (n != len(rest) && (!allowSuffix || n+1 >= len(rest) || rest[n] != '-')) {
+		return false
+	}
+	return name[:i] == r.clusterID
 }
 
 // Run executes the full decommission. It returns an error when the run is

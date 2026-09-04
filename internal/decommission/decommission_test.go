@@ -157,63 +157,84 @@ func TestWaitUntilContextCancelledEndsWait(t *testing.T) {
 	}
 }
 
-// --- hasClusterPrefix ----------------------------------------------------
+// --- hasClusterNodeName --------------------------------------------------
 //
-// hasClusterPrefix decides which Machines/NetworkConfigurations are "ours"
-// for both counting (verifyTeardown) and deletion purposes elsewhere in the
-// package. Getting it wrong means touching, or worse reporting deleted, a
-// neighbouring cluster's resources.
+// hasClusterNodeName decides which generated node resources are "ours".
+// Getting it wrong means touching, or worse reporting deleted, a neighbouring
+// cluster's resources.
 
-func TestHasClusterPrefixMatchesOwnResource(t *testing.T) {
+func TestHasClusterNodeNameMatchesOwnResource(t *testing.T) {
 	r, _ := newTestRunner(t, nil, nil) // clusterID = testClusterID = "t-team-001-ab12"
-	if !r.hasClusterPrefix(testClusterID + "-ctp0") {
+	if !r.hasClusterNodeName(testClusterID+"-ctp0", false) {
 		t.Fatal("a name of the form <clusterID>-<suffix> must be recognised as belonging to this cluster")
+	}
+	if !r.hasClusterNodeName(testClusterID+"-wrk12-vlan2100", true) {
+		t.Fatal("an allocation extending an owned worker name must be recognised")
 	}
 }
 
-// TestHasClusterPrefixRejectsBareClusterID: the bare clusterID with no
-// suffix is never a valid Machine/NetworkConfiguration name in this scheme;
-// treating it as a match would be a modelling error, not a real object.
-func TestHasClusterPrefixRejectsBareClusterID(t *testing.T) {
+// TestHasClusterNodeNameRejectsBareClusterID: the bare clusterID with no node
+// segment is never a generated Machine name in this scheme.
+func TestHasClusterNodeNameRejectsBareClusterID(t *testing.T) {
 	r, _ := newTestRunner(t, nil, nil)
-	if r.hasClusterPrefix(testClusterID) {
+	if r.hasClusterNodeName(testClusterID, false) {
 		t.Fatal("the bare clusterID (no trailing dash + suffix) must not match")
 	}
 }
 
-// TestHasClusterPrefixRejectsSharedStringPrefix is the collision-safety
+// TestHasClusterNodeNameRejectsSharedStringPrefix is the collision-safety
 // property the doc comment promises: a neighbour cluster whose id merely
 // starts with the same characters (e.g. "t-team-001-ab12x") must NOT match
-// "t-team-001-ab12"'s prefix check. If it did, this runner would delete a
+// "t-team-001-ab12"'s ID. If it did, this runner would count a
 // different, still-live cluster's Machines.
-func TestHasClusterPrefixRejectsSharedStringPrefix(t *testing.T) {
+func TestHasClusterNodeNameRejectsSharedStringPrefix(t *testing.T) {
 	r, _ := newTestRunner(t, nil, nil) // clusterID = "t-team-001-ab12"
 	neighbourMachine := testClusterID + "x-ctp0"
-	if r.hasClusterPrefix(neighbourMachine) {
+	if r.hasClusterNodeName(neighbourMachine, false) {
 		t.Fatalf("name %q must not match clusterID %q — it belongs to a different cluster whose id merely shares a string prefix; the trailing dash is what must prevent this", neighbourMachine, testClusterID)
 	}
 }
 
-// TestHasClusterPrefixNestedClusterIDCurrentBehaviour pins the CURRENT
-// behaviour for the nested case, not a wished-for one: a runner for cluster
-// "t-a" is a strict string-prefix (plus dash) of a resource that actually
-// belongs to a distinct cluster "t-a-b" (e.g. Machine "t-a-b-ctp0"). Because
-// hasClusterPrefix only checks strings.HasPrefix(name, clusterID+"-"), the
-// "t-a" runner WILL match "t-a-b-ctp0" and would count/delete it as its own.
-// This is a real collision risk whenever one cluster's id is itself a
-// dash-joined prefix of another's — flagged in the report, not fixed here.
-func TestHasClusterPrefixNestedClusterIDCurrentBehaviour(t *testing.T) {
+func TestHasClusterNodeNameRejectsNestedClusterID(t *testing.T) {
 	r, _ := newTestRunner(t, nil, nil)
 	r.clusterID = "t-a"
 	nestedNeighbourMachine := "t-a-b-ctp0" // actually belongs to cluster "t-a-b"
-	if !r.hasClusterPrefix(nestedNeighbourMachine) {
-		t.Fatal("documenting current behaviour: hasClusterPrefix(\"t-a-b-ctp0\") for clusterID \"t-a\" is currently true (collision risk); if this ever flips to false, update the comment describing the risk")
+	if r.hasClusterNodeName(nestedNeighbourMachine, false) {
+		t.Fatal("a nested neighbouring cluster ID must not be accepted as this cluster's generated node name")
+	}
+	nestedNeighbourAllocation := "t-a-ctp1-ctp0-vlan2100" // belongs to cluster "t-a-ctp1"
+	if r.hasClusterNodeName(nestedNeighbourAllocation, true) {
+		t.Fatal("an allocation for a neighbouring cluster whose ID contains a node segment must not match")
+	}
+}
+
+func TestOwnsNetworkConfigurationUsesExactIdentity(t *testing.T) {
+	r, _ := newTestRunner(t, nil, nil)
+	r.clusterID = "t-a"
+
+	explicit := &vitiv1alpha1.NetworkConfiguration{}
+	explicit.Name = "unrelated-name"
+	explicit.Spec.ClusterIdentifier = "t-a"
+	if !r.ownsNetworkConfiguration(explicit) {
+		t.Fatal("an exact spec.clusterIdentifier must establish ownership")
+	}
+
+	legacy := &vitiv1alpha1.NetworkConfiguration{}
+	legacy.Name = "t-a-ctp0"
+	if !r.ownsNetworkConfiguration(legacy) {
+		t.Fatal("a legacy NetworkConfiguration with an exact generated node name must match")
+	}
+
+	neighbour := &vitiv1alpha1.NetworkConfiguration{}
+	neighbour.Name = "t-a-b-ctp0"
+	if r.ownsNetworkConfiguration(neighbour) {
+		t.Fatal("a legacy NetworkConfiguration for nested cluster t-a-b must not belong to t-a")
 	}
 }
 
 // --- New -----------------------------------------------------------------
 
-// TestNewRefusesEmptyClusterID: clusterId drives hasClusterPrefix, the
+// TestNewRefusesEmptyClusterID: clusterId drives generated-name matching, the
 // Machine/NetworkConfiguration deletion filter, and the cpvip/IPAllocation
 // lookups by name. An empty clusterId would match everything (empty-string
 // prefix) or nothing meaningful — New must refuse outright rather than let
