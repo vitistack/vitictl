@@ -171,6 +171,9 @@ const (
 	// StatusAhead means the local build's semver is newer than the latest
 	// published release — typical for unreleased main builds.
 	StatusAhead
+	// StatusUnknown means the latest release tag is not a version, so no
+	// comparison is possible. Callers must not treat it as an upgrade.
+	StatusUnknown
 )
 
 // Compare classifies the relationship between the locally installed version
@@ -188,9 +191,16 @@ func Compare(local, latestTag string) Status {
 
 	lv, lok := parseSemver(local)
 	rv, rok := parseSemver(latestTag)
-	if !lok || !rok {
-		// Fall back: if they aren't equal and we can't parse, treat as
-		// outdated so the user at least sees the release pointer.
+	if !rok {
+		// The release pointer is not a version. Never call that "newer":
+		// upgrade installs on StatusOutdated, so a release published under
+		// any other name would otherwise roll out to every machine that
+		// asks. Seen for real on 2026-09-08.
+		return StatusUnknown
+	}
+	if !lok {
+		// A malformed local build still upgrades — that is the way back onto
+		// a real release for a machine that installed one.
 		return StatusOutdated
 	}
 

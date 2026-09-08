@@ -312,11 +312,17 @@ func (e *Entry) ChecksumsName(version string) string {
 
 // CosignIdentity returns the OIDC identity regex cosign should accept
 // when verifying release signatures.
+//
+// The default pins the tag shape as well as the workflow. A release
+// published under any other name is signed by the very same workflow, so
+// the ref is the only thing in the certificate that tells a real release
+// from a stray one.
 func (e *Entry) CosignIdentity() string {
 	if e.CosignIdentityRegex != "" {
 		return e.CosignIdentityRegex
 	}
-	return "^https://github.com/" + e.Repo + "/.github/workflows/release.yml@refs/tags/"
+	return "^https://github.com/" + e.Repo +
+		`/.github/workflows/release.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$`
 }
 
 // BaseDownloadURL returns the prefix under which release assets live for

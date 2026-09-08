@@ -40,6 +40,8 @@ func TestPlanRun(t *testing.T) {
 			runPlan{windowsHint: true, plugins: true}},
 		{"ahead of the release: no installer", release.StatusAhead, "linux", false, 1,
 			runPlan{plugins: true}},
+		{"latest tag is not a version: no installer", release.StatusUnknown, "linux", false, 1,
+			runPlan{plugins: true}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -63,6 +65,12 @@ func TestPluginStatusLine(t *testing.T) {
 	line = pluginStatusLine("kubevirt", "v0.1.1", "v0.1.1", nil)
 	if !strings.Contains(line, "up to date") {
 		t.Errorf("current line %q should say up to date", line)
+	}
+	// A latest tag that is not a version is the one case that must not look
+	// like success: this is the row a fleet reads before running upgrade.
+	line = pluginStatusLine("nhn", "v0.1.22", "definitely-no-such-tag-zzz", nil)
+	if strings.Contains(line, "up to date") || !strings.Contains(line, "not a version") {
+		t.Errorf("unknown-latest line %q should warn that the tag is not a version", line)
 	}
 	line = pluginStatusLine("nhn", "v0.1.0", "", errors.New("github API returned 404"))
 	if !strings.Contains(line, "404") || !strings.Contains(line, "nhn") {
@@ -104,6 +112,7 @@ func TestShowRunHint(t *testing.T) {
 		{"everything current", release.StatusUpToDate, 0, false},
 		{"development build", release.StatusDevelopment, 0, true},
 		{"ahead of the release", release.StatusAhead, 0, false},
+		{"latest tag is not a version", release.StatusUnknown, 0, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

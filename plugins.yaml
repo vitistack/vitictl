@@ -36,7 +36,8 @@
 #   checksumsAsset:      SHA256SUMS filename template; default
 #                        "viti-{name}-{version}-SHA256SUMS"
 #   cosignIdentityRegex: OIDC identity regex for cosign verify-blob;
-#                        default "^https://github.com/{repo}/.github/workflows/release.yml@refs/tags/"
+#                        default "^https://github.com/{repo}/.github/workflows/release.yml@refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.]+)?$"
+#                        (anchored to a vX.Y.Z tag: any other tag is signed by the same workflow)
 #   private:             optional; omit it for a normal, listed plugin.
 #                        true keeps the entry out of `viti plugin list
 #                        --available` unless --all is passed. It controls

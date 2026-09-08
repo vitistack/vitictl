@@ -73,8 +73,15 @@ func printReleaseCheck(ctx context.Context, out io.Writer, local string) error {
 		_, _ = fmt.Fprintf(out, "⚠️  could not check for updates: %v\n", err)
 		return nil
 	}
-	status := release.Compare(local, latest.Tag)
-	switch status {
+	printReleaseStatus(out, local, latest)
+	return nil
+}
+
+// printReleaseStatus renders the comparison between the local build and the
+// latest release. Split from the fetch so every branch is testable without
+// the network.
+func printReleaseStatus(out io.Writer, local string, latest *release.Latest) {
+	switch release.Compare(local, latest.Tag) {
 	case release.StatusUpToDate:
 		_, _ = fmt.Fprintf(out, "✅ you are on the latest release (%s)\n", latest.Tag)
 	case release.StatusOutdated:
@@ -87,8 +94,12 @@ func printReleaseCheck(ctx context.Context, out io.Writer, local string) error {
 	case release.StatusDevelopment:
 		_, _ = fmt.Fprintf(out, "🛠  development build (%s); latest release is %s\n", local, latest.Tag)
 		_, _ = fmt.Fprintf(out, "   release notes: %s\n", latest.URL)
+	case release.StatusUnknown:
+		// Signed by the real workflow and passing every other check, so
+		// this warning is what keeps a stray release from reading as an
+		// upgrade.
+		_, _ = fmt.Fprintf(out, "⚠️  latest release tag %q is not a version — ignoring it\n", latest.Tag)
 	}
-	return nil
 }
 
 func Execute() error {

@@ -55,6 +55,8 @@ signature); the plugins go through the same verified path as
 			_, _ = fmt.Fprintln(out, "🛠  development build — the installer switches to the latest release")
 		case release.StatusOutdated:
 			_, _ = fmt.Fprintln(out, "🆕 a newer release is available")
+		case release.StatusUnknown:
+			_, _ = fmt.Fprintf(out, "⚠️  latest release tag %q is not a version — not upgrading viti\n", latest.Tag)
 		}
 		cmdline := release.UpgradeHint()
 		needSelf := status == release.StatusOutdated || status == release.StatusDevelopment
@@ -183,6 +185,8 @@ func pluginStatusLine(name, installed, latest string, err error) string {
 	switch release.Compare(installed, latest) {
 	case release.StatusOutdated:
 		return fmt.Sprintf("🆕 %s: %s → %s available", name, installed, latest)
+	case release.StatusUnknown:
+		return fmt.Sprintf("⚠️  %s: %s (latest release tag %q is not a version — not upgrading)", name, installed, latest)
 	case release.StatusAhead, release.StatusDevelopment:
 		return fmt.Sprintf("🧪 %s: %s is ahead of the latest release (%s)", name, installed, latest)
 	default:

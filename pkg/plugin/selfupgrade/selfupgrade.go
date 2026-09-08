@@ -94,8 +94,31 @@ func printReleaseStatus(out io.Writer, o Options, latest *release.Latest) error 
 	case release.StatusDevelopment:
 		_, _ = fmt.Fprintf(out, "🛠  development build (%s); latest release is %s\n", o.Version, latest.Tag)
 		_, _ = fmt.Fprintf(out, "   release notes: %s\n", latest.URL)
+	case release.StatusUnknown:
+		_, _ = fmt.Fprintf(out, "⚠️  latest release tag %q is not a version — ignoring it\n", latest.Tag)
 	}
 	return nil
+}
+
+// upgradeDecision is the switch behind `upgrade --run`: the line to print for
+// status, and whether the installer may run at all. Only a real, newer
+// release (or a dev build switching to one) proceeds. StatusUnknown is
+// refused out loud: a release under a non-version tag is signed by the real
+// workflow and passes every other check, so this is the line between a
+// stray release and every plugin user installing it.
+func upgradeDecision(status release.Status, latestTag string) (line string, proceed bool) {
+	switch status {
+	case release.StatusUpToDate:
+		return "✅ already on the latest release — nothing to do", false
+	case release.StatusAhead:
+		return "🧪 local build is ahead of the latest release — nothing to do", false
+	case release.StatusDevelopment:
+		return "🛠  development build — switch to the latest release with:", true
+	case release.StatusOutdated:
+		return "🆕 a newer release is available", true
+	default:
+		return fmt.Sprintf("⚠️  latest release tag %q is not a version — not upgrading", latestTag), false
+	}
 }
 
 // NewUpgradeCmd builds the `upgrade` command for the plugin described by o.
@@ -132,17 +155,10 @@ GitHub token: set GH_TOKEN (or GITHUB_TOKEN), or run "gh auth login".`, o.Name, 
 			_, _ = fmt.Fprintf(out, "installed: %s\n", o.Version)
 			_, _ = fmt.Fprintf(out, "latest:    %s\n", latest.Tag)
 
-			switch release.Compare(o.Version, latest.Tag) {
-			case release.StatusUpToDate:
-				_, _ = fmt.Fprintln(out, "✅ already on the latest release — nothing to do")
+			line, proceed := upgradeDecision(release.Compare(o.Version, latest.Tag), latest.Tag)
+			_, _ = fmt.Fprintln(out, line)
+			if !proceed {
 				return nil
-			case release.StatusAhead:
-				_, _ = fmt.Fprintln(out, "🧪 local build is ahead of the latest release — nothing to do")
-				return nil
-			case release.StatusDevelopment:
-				_, _ = fmt.Fprintln(out, "🛠  development build — switch to the latest release with:")
-			case release.StatusOutdated:
-				_, _ = fmt.Fprintln(out, "🆕 a newer release is available")
 			}
 
 			hint := release.UpgradeHint(o.Name)
