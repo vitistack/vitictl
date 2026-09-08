@@ -309,16 +309,21 @@ func sha256File(path string) (string, error) {
 }
 
 // verifyCosign shells out to `cosign verify-blob` using the release's
-// .cosign.bundle asset. Matches install.sh's behavior: if cosign is not
-// on PATH, warn and skip (don't fail the install).
+// .cosign.bundle asset.
+//
+// The bundle is fetched first and is mandatory: every release this installer
+// is meant to consume ships one per archive, so a missing bundle describes
+// the release, not the machine, and the install stops there. Only once the
+// bundle is in hand does a missing cosign binary downgrade to a warning —
+// matching install.sh, which has no cosign to call either.
 func verifyCosign(ctx context.Context, stderr io.Writer, entry *Entry, version, archive, archivePath, identity, tmp string) error {
-	if _, err := exec.LookPath("cosign"); err != nil {
-		logf(stderr, "⚠️  cosign not found on PATH — skipping signature verification")
-		return nil
-	}
 	bundle := filepath.Join(tmp, archive+".cosign.bundle")
 	if err := fetchAsset(ctx, entry, version, archive+".cosign.bundle", bundle); err != nil {
-		logf(stderr, "⚠️  cosign bundle not available (%v) — skipping signature verification", err)
+		return fmt.Errorf("release %s of %s has no cosign bundle for %s — refusing to install an unsigned release: %w",
+			version, entry.Repo, archive, err)
+	}
+	if _, err := exec.LookPath("cosign"); err != nil {
+		logf(stderr, "⚠️  cosign not found on PATH — skipping signature verification")
 		return nil
 	}
 	logf(stderr, "verifying Sigstore signature with cosign")

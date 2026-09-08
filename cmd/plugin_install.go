@@ -290,18 +290,14 @@ func upgradeOne(ctx context.Context, stdout, stderr io.Writer, idx *pluginmgr.In
 	if err != nil {
 		return fmt.Errorf("checking %s: %w", entry.Repo, err)
 	}
-	switch release.Compare(state.Version, latestTag) {
-	case release.StatusUpToDate:
-		// Aliases are reconciled even here. A plugin already on the latest
-		// release never reinstalls, so without this an alias added to the
-		// index would reach new installs only and never anyone already
-		// current — which is most people.
+	status := release.Compare(state.Version, latestTag)
+	if line, skip := skipUpgradeLine(status, state.Name, state.Version, latestTag); skip {
+		// Aliases are reconciled even when nothing installs. A plugin already
+		// on the latest release never reinstalls, so without this an alias
+		// added to the index would reach new installs only and never anyone
+		// already current — which is most people.
 		reconcileAliases(stdout, stderr, entry, state)
-		_, _ = fmt.Fprintf(stdout, "✅ %s %s — already up to date\n", state.Name, state.Version)
-		return nil
-	case release.StatusAhead:
-		reconcileAliases(stdout, stderr, entry, state)
-		_, _ = fmt.Fprintf(stdout, "🧪 %s %s is ahead of latest (%s) — skipping\n", state.Name, state.Version, latestTag)
+		_, _ = fmt.Fprintln(stdout, line)
 		return nil
 	}
 	_, _ = fmt.Fprintf(stdout, "⬆️  %s: %s -> %s\n", state.Name, state.Version, latestTag)
@@ -365,4 +361,22 @@ func init() {
 	pluginCmd.AddCommand(pluginInstallCmd)
 	pluginCmd.AddCommand(pluginUpgradeCmd)
 	pluginCmd.AddCommand(pluginUninstallCmd)
+}
+
+// skipUpgradeLine decides whether an upgrade for a plugin in status is skipped
+// and, if so, what to tell the user. Only StatusOutdated and StatusDevelopment
+// install. StatusUnknown — a latest tag that is not a version — is refused
+// out loud: it is signed by the real workflow and passes every other check,
+// so this line is the only thing standing between a stray release and a
+// fleet-wide rollout.
+func skipUpgradeLine(status release.Status, name, installed, latest string) (string, bool) {
+	switch status {
+	case release.StatusUpToDate:
+		return fmt.Sprintf("✅ %s %s — already up to date", name, installed), true
+	case release.StatusAhead:
+		return fmt.Sprintf("🧪 %s %s is ahead of latest (%s) — skipping", name, installed, latest), true
+	case release.StatusUnknown:
+		return fmt.Sprintf("⚠️  %s %s — latest release tag %q is not a version, not upgrading", name, installed, latest), true
+	}
+	return "", false
 }

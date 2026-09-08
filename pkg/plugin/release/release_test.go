@@ -201,6 +201,12 @@ func TestCompare(t *testing.T) {
 		{"empty local", "", "v1.2.3", StatusDevelopment},
 		{"git describe on the release commit", "v1.2.3-5-gabc1234", "v1.2.3", StatusDevelopment},
 		{"unparseable local", "banana", "v1.2.3", StatusOutdated},
+		// A latest tag that is not a version must never read as "newer":
+		// upgrade installs on StatusOutdated, so this is the difference
+		// between a stray release being ignored and being rolled out.
+		{"unparseable latest", "v1.2.3", "definitely-no-such-tag-zzz", StatusUnknown},
+		{"unparseable both sides", "banana", "zzz", StatusUnknown},
+		{"latest is a branch name", "v0.1.22", "main", StatusUnknown},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

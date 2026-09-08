@@ -226,6 +226,15 @@ func TestPrintReleaseStatus(t *testing.T) {
 			want:       []string{"development build", "dev", "v1.2.3"},
 			wantAbsent: []string{"viti plugin upgrade example"},
 		},
+		{
+			// A latest tag that is not a version is signed by the real
+			// workflow and passes every other check; this line is what keeps
+			// it from reading as an upgrade.
+			name:  "latest tag that is not a version warns and offers nothing",
+			local: "v1.2.3", tag: "definitely-no-such-tag-zzz",
+			want:       []string{"not a version", "definitely-no-such-tag-zzz"},
+			wantAbsent: []string{"viti plugin upgrade example", "newer release", "--run"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
