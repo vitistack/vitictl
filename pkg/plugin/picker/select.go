@@ -143,6 +143,10 @@ func run(title string, header []string, items []Item, multi bool) ([]Item, error
 			m.toggle()
 		case "<C-a>":
 			m.toggleAll()
+		case "<Right>":
+			m.expand()
+		case "<Left>":
+			m.collapse()
 		case "<Up>":
 			m.up()
 		case "<Down>":
@@ -170,12 +174,20 @@ func run(title string, header []string, items []Item, multi bool) ([]Item, error
 // statusLine renders the key hints, plus the running mark count in multi mode
 // so a selection made under one filter is still visible under the next.
 func statusLine(m *model) string {
+	// The expand hint appears only when something in the list can expand.
+	// Advertising a key that does nothing is how a status line stops being
+	// read at all.
+	expand := ""
+	if m.hasChildren() {
+		expand = "  [←/→] collapse/expand"
+	}
 	if !m.multi {
-		return "[type] filter  [↑/↓] move  [PgUp/PgDn] page  [Enter] select  [Ctrl-U] clear  [Esc/q] cancel"
+		return "[type] filter  [↑/↓] move" + expand +
+			"  [PgUp/PgDn] page  [Enter] select  [Ctrl-U] clear  [Esc/q] cancel"
 	}
 	return fmt.Sprintf(
-		"[type] filter  [↑/↓] move  [Tab] mark  [Ctrl-A] mark all shown  [Enter] confirm (%d marked)  [Ctrl-U] clear  [Esc] cancel",
-		m.markedCount())
+		"[type] filter  [↑/↓] move%s  [Tab] mark  [Ctrl-A] mark all shown  [Enter] confirm (%d marked)  [Ctrl-U] clear  [Esc] cancel",
+		expand, m.markedCount())
 }
 
 // borderlessParagraph returns a paragraph that actually fills a one-row rect.

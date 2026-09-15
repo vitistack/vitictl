@@ -432,3 +432,153 @@ func TestRowsAreColumnAligned(t *testing.T) {
 			first, second, rows[0], rows[1])
 	}
 }
+
+// nested is a two-level fixture: one row that owns informational children,
+// two that own nothing.
+//
+// The labels are deliberately meaningless. These tests are about structure —
+// what expands, what filters, what can be chosen — and a fixture naming real
+// resources invites a reader to reason about that domain instead of the tree.
+// The child labels share no prefix with any parent, so a query matching a child
+// proves the match came from the child.
+func nested() []Item {
+	return []Item{
+		{Label: "alpha", Columns: []string{"alpha", "1"}},
+		{Label: "beta", Columns: []string{"beta", "3"},
+			Children: []Item{
+				{Label: "delta", Columns: []string{"delta", ""}, Info: true},
+				{Label: "epsilon", Columns: []string{"epsilon", ""}, Info: true},
+			}},
+		{Label: "gamma", Columns: []string{"gamma", "1"}},
+	}
+}
+
+func TestChildrenAreHiddenUntilExpanded(t *testing.T) {
+	m := newModel(nested())
+	if got := labelsOf(m.visible()); len(got) != 3 {
+		t.Fatalf("visible = %v, want only the three parents", got)
+	}
+
+	m.cursor = 1
+	m.expand()
+	if got := labelsOf(m.visible()); len(got) != 5 {
+		t.Errorf("visible after expand = %v, want the two children inserted", got)
+	}
+	m.collapse()
+	if got := labelsOf(m.visible()); len(got) != 3 {
+		t.Errorf("visible after collapse = %v, want the children hidden again", got)
+	}
+}
+
+// Left on a child steps out to its parent, which is what it means in every tree
+// widget — and leaves the cursor somewhere that still exists.
+func TestCollapseFromAChildStepsOutToTheParent(t *testing.T) {
+	m := newModel(nested())
+	m.cursor = 1
+	m.expand()
+	m.cursor = 2
+	m.collapse()
+
+	if got := labelsOf(m.visible()); len(got) != 3 {
+		t.Fatalf("visible = %v, want the parent collapsed", got)
+	}
+	sel, ok := m.selected()
+	if !ok || sel.Label != "beta" {
+		t.Errorf("cursor on %+v, want the parent it stepped out to", sel)
+	}
+}
+
+// Filtering on something only a child mentions must surface the parent that
+// owns it. An orphaned child row would say "this exists somewhere" and leave
+// the reader to guess where.
+func TestFilterOnAChildLabelFindsTheParent(t *testing.T) {
+	m := newModel(nested())
+	for _, r := range "delta" {
+		m.push(r)
+	}
+
+	got := labelsOf(m.visible())
+	if len(got) != 1 || got[0] != "beta" {
+		t.Fatalf("visible = %v, want the parent that owns the matching child", got)
+	}
+	if m.expand(); len(m.visible()) != 3 {
+		t.Errorf("visible after expand = %v, want the parent and both children",
+			labelsOf(m.visible()))
+	}
+}
+
+// A collapsed parent hides its children under any query, so filtering can never
+// produce a child row floating without its owner.
+func TestCollapsedChildrenStayHiddenWhileFiltering(t *testing.T) {
+	m := newModel(nested())
+	m.push('a')
+	for _, i := range m.filtered {
+		if m.meta[i].parent >= 0 {
+			t.Fatalf("child %q is visible while its parent is collapsed", m.all[i].Label)
+		}
+	}
+}
+
+// Expanding a row shows what it contains. It does not offer the contents as
+// alternatives to it.
+func TestInfoRowsCannotBeMarkedOrConfirmed(t *testing.T) {
+	m := newModel(nested()).withMulti()
+	m.cursor = 1
+	m.expand()
+
+	m.cursor = 2
+	m.toggle()
+	if m.markedCount() != 0 {
+		t.Errorf("marked = %d, want an Info row to be unmarkable", m.markedCount())
+	}
+	// Enter with nothing marked falls back to the cursor row, which must not
+	// resolve to context either.
+	if got := m.confirmed(); len(got) != 0 {
+		t.Errorf("confirmed = %+v, want nothing from an Info row", got)
+	}
+
+	// Ctrl-A marks what is on offer and skips the rest.
+	m.toggleAll()
+	if m.markedCount() != 3 {
+		t.Errorf("marked = %d, want the three selectable rows only", m.markedCount())
+	}
+	for _, it := range m.confirmed() {
+		if it.Info {
+			t.Errorf("confirmed included the Info row %q", it.Label)
+		}
+	}
+}
+
+// The disclosure marker and indent are part of the first column's width, or
+// every expanded row pushes its remaining cells out of alignment.
+func TestExpandedRowsStayColumnAligned(t *testing.T) {
+	m := newModel(nested())
+	m.cursor = 1
+	m.expand()
+
+	rows := m.rows()
+	if len(rows) != 5 {
+		t.Fatalf("rows = %d, want five", len(rows))
+	}
+	if !strings.Contains(rows[1], "▾ beta") {
+		t.Errorf("expanded parent = %q, want an open disclosure marker", rows[1])
+	}
+	// The second column starts at the same offset on a parent's neighbour and
+	// on the last leaf, whatever indentation sits between them.
+	if strings.Index(rows[0], "1") != strings.Index(rows[4], "1") {
+		t.Errorf("columns misaligned:\n%q\n%q", rows[0], rows[4])
+	}
+}
+
+// A flat list must render and behave exactly as it did before children existed.
+func TestFlatListsAreUnaffected(t *testing.T) {
+	m := newModel(items("alpha", "beta"))
+	if m.hasChildren() {
+		t.Error("a flat list must not advertise expand keys")
+	}
+	for _, row := range m.rows() {
+		if strings.ContainsAny(row, "▸▾") {
+			t.Errorf("flat row %q grew a disclosure marker", row)
+		}
+	}
+}

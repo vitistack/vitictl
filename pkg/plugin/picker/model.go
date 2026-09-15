@@ -23,6 +23,22 @@ type Item struct {
 	Columns []string
 	// Value is the caller's own payload for the row.
 	Value any
+	// Children are rows shown indented beneath this one when it is expanded,
+	// and hidden when it is collapsed. A row with children renders a ▸ or ▾
+	// disclosure marker and responds to Right and Left.
+	//
+	// Their labels also join this row's search text, so filtering on something
+	// only a child mentions surfaces the parent that owns it rather than an
+	// orphan with no context.
+	Children []Item
+	// Info marks a row that is shown but cannot be chosen: context for the row
+	// above it rather than an option of its own. Marking skips it, Ctrl-A skips
+	// it, and Enter never resolves to it.
+	//
+	// Expanding a thing to see what it contains is not the same as offering
+	// its contents as alternatives to it. A caller showing what a choice drags
+	// along with it wants those rows read, not picked.
+	Info bool
 }
 
 // defaultViewport is the assumed page size before a terminal height is known.
@@ -39,8 +55,21 @@ const markerWidth = 4
 // filtered holds indices into all rather than copies, so a row's identity
 // survives refiltering. That is what lets a mark made under one query still be
 // a mark under the next one.
+// rowMeta is a flattened row's place in the tree: how deep it sits, which row
+// owns it, and whether it owns any itself.
+type rowMeta struct {
+	depth  int
+	parent int
+	kids   int
+	// search is the row's own label plus every descendant label, so a query
+	// that only a child mentions still finds the parent.
+	search string
+}
+
 type model struct {
 	all      []Item
+	meta     []rowMeta
+	expanded map[int]struct{}
 	filtered []int
 	query    string
 	cursor   int
@@ -56,10 +85,97 @@ type model struct {
 	header Item
 }
 
-func newModel(all []Item) *model {
-	m := &model{all: all, viewport: defaultViewport, marked: map[int]struct{}{}}
+func newModel(items []Item) *model {
+	m := &model{viewport: defaultViewport, marked: map[int]struct{}{},
+		expanded: map[int]struct{}{}}
+	m.flatten(items, 0, -1)
 	m.applyFilter()
 	return m
+}
+
+// flatten lays the tree out as one slice, recording each row's depth and owner.
+//
+// Flattening rather than nesting keeps every existing invariant: filtered still
+// holds indices into all, so a mark made under one query survives the next, and
+// collapsing a parent is a visibility question rather than a restructuring one.
+func (m *model) flatten(items []Item, depth, parent int) {
+	for _, it := range items {
+		idx := len(m.all)
+		m.all = append(m.all, it)
+		m.meta = append(m.meta, rowMeta{
+			depth: depth, parent: parent, kids: len(it.Children),
+			search: searchText(it),
+		})
+		m.flatten(it.Children, depth+1, idx)
+	}
+}
+
+// searchText is a row's label plus every descendant's, so filtering on a child
+// finds the parent that owns it.
+func searchText(it Item) string {
+	var b strings.Builder
+	b.WriteString(it.Label)
+	var walk func(kids []Item)
+	walk = func(kids []Item) {
+		for _, k := range kids {
+			b.WriteString(" ")
+			b.WriteString(k.Label)
+			walk(k.Children)
+		}
+	}
+	walk(it.Children)
+	return b.String()
+}
+
+// shown reports whether every ancestor of a row is expanded.
+func (m *model) shown(i int) bool {
+	for p := m.meta[i].parent; p >= 0; p = m.meta[p].parent {
+		if _, open := m.expanded[p]; !open {
+			return false
+		}
+	}
+	return true
+}
+
+// expand opens the row under the cursor, if it has children to show.
+func (m *model) expand() {
+	idx, ok := m.cursorIndex()
+	if !ok || m.meta[idx].kids == 0 {
+		return
+	}
+	m.expanded[idx] = struct{}{}
+	m.applyFilter()
+}
+
+// collapse closes the row under the cursor, or steps out to its parent when the
+// cursor is already on a leaf — which is what Left means in every tree widget.
+func (m *model) collapse() {
+	idx, ok := m.cursorIndex()
+	if !ok {
+		return
+	}
+	if _, open := m.expanded[idx]; open {
+		delete(m.expanded, idx)
+		m.applyFilter()
+		return
+	}
+	parent := m.meta[idx].parent
+	if parent < 0 {
+		return
+	}
+	delete(m.expanded, parent)
+	m.applyFilter()
+	m.cursorTo(parent)
+}
+
+// cursorTo puts the cursor on a row of all, if it is currently visible.
+func (m *model) cursorTo(idx int) {
+	for pos, i := range m.filtered {
+		if i == idx {
+			m.cursor = pos
+			return
+		}
+	}
 }
 
 // withHeader returns the model set up to reserve width for a header row.
@@ -116,7 +232,7 @@ func (m *model) cursorIndex() (int, bool) {
 // needs no marking step at all.
 func (m *model) confirmed() []Item {
 	if len(m.marked) == 0 {
-		if sel, ok := m.selected(); ok {
+		if sel, ok := m.selected(); ok && !sel.Info {
 			return []Item{sel}
 		}
 		return nil
@@ -137,7 +253,10 @@ func (m *model) toggle() {
 		return
 	}
 	idx, ok := m.cursorIndex()
-	if !ok {
+	if !ok || m.all[idx].Info {
+		// Stepping down anyway keeps Tab usable as a walk through a list that
+		// happens to contain context rows.
+		m.down()
 		return
 	}
 	if _, on := m.marked[idx]; on {
@@ -157,18 +276,35 @@ func (m *model) toggleAll() {
 	}
 	allOn := true
 	for _, idx := range m.filtered {
+		if m.all[idx].Info {
+			continue
+		}
 		if _, on := m.marked[idx]; !on {
 			allOn = false
 			break
 		}
 	}
 	for _, idx := range m.filtered {
+		if m.all[idx].Info {
+			continue
+		}
 		if allOn {
 			delete(m.marked, idx)
 			continue
 		}
 		m.marked[idx] = struct{}{}
 	}
+}
+
+// hasChildren reports whether any row can expand, so the status line can offer
+// the keys only where they do something.
+func (m *model) hasChildren() bool {
+	for i := range m.meta {
+		if m.meta[i].kids > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // markedCount reports how many rows are marked, for the status line.
@@ -198,22 +334,37 @@ func (m *model) clear() {
 // applyFilter recomputes the visible rows and keeps the cursor in range —
 // a shorter list must never leave it pointing past the end.
 func (m *model) applyFilter() {
+	hit := make([]bool, len(m.all))
 	if m.query == "" {
-		m.filtered = make([]int, len(m.all))
-		for i := range m.all {
-			m.filtered[i] = i
+		for i := range hit {
+			hit[i] = true
 		}
 	} else {
-		labels := make([]string, len(m.all))
-		for i, it := range m.all {
-			labels[i] = it.Label
+		texts := make([]string, len(m.all))
+		for i := range m.all {
+			texts[i] = m.meta[i].search
 		}
-		matches := fuzzy.Find(m.query, labels)
-		out := make([]int, 0, len(matches))
-		for _, match := range matches {
-			out = append(out, match.Index)
+		for _, match := range fuzzy.Find(m.query, texts) {
+			hit[match.Index] = true
 		}
-		m.filtered = out
+	}
+
+	// A row survives the filter when it matched or an ancestor did: narrowing
+	// to a parent means wanting what it contains, not wanting it stripped of
+	// its contents. Visibility is then a separate question, so a collapsed
+	// parent still hides its children under any query.
+	m.filtered = m.filtered[:0]
+	for i := range m.all {
+		if !m.shown(i) {
+			continue
+		}
+		keep := hit[i]
+		for p := m.meta[i].parent; !keep && p >= 0; p = m.meta[p].parent {
+			keep = hit[p]
+		}
+		if keep {
+			m.filtered = append(m.filtered, i)
+		}
 	}
 	m.clampCursor()
 }
@@ -243,17 +394,54 @@ func (m *model) moveBy(delta int) {
 	}
 }
 
+// displayItem is the row as drawn: its first cell carries the indent and the
+// disclosure marker.
+//
+// Built before measuring rather than glued on after, so the prefix is part of
+// the width the other columns align to. Adding it at render time instead pushed
+// every expanded row's remaining cells out of the column they shared with their
+// neighbours.
+func (m *model) displayItem(i int) Item {
+	it := m.all[i]
+	meta := m.meta[i]
+	if meta.depth == 0 && meta.kids == 0 {
+		return it
+	}
+	marker := "  "
+	if meta.kids > 0 {
+		marker = "▸ "
+		if _, open := m.expanded[i]; open {
+			marker = "▾ "
+		}
+	}
+	prefix := strings.Repeat("  ", meta.depth) + marker
+	cells := make([]string, len(it.Columns))
+	copy(cells, it.Columns)
+	if len(cells) == 0 {
+		cells = []string{prefix}
+	} else {
+		cells[0] = prefix + cells[0]
+	}
+	it.Columns = cells
+	return it
+}
+
 // rows renders the visible items as column-aligned strings, so the picker
 // reads like the tables the rest of the CLI prints.
 func (m *model) rows() []string {
 	widths := m.columnWidths()
 	out := make([]string, 0, len(m.filtered))
 	for _, idx := range m.filtered {
-		row := renderRow(m.all[idx], widths)
+		row := renderRow(m.displayItem(idx), widths)
 		if m.multi {
-			marker := "[ ] "
-			if _, on := m.marked[idx]; on {
-				marker = "[x] "
+			// An Info row cannot be marked, so it gets a blank gutter rather
+			// than an empty checkbox offering something that is not on offer.
+			marker := "    "
+			if !m.all[idx].Info {
+				marker = "[ ] "
+				if _, on := m.marked[idx]; on {
+					marker = "[x] "
+				}
 			}
 			row = marker + row
 		}
@@ -280,7 +468,7 @@ func (m *model) columnWidths() []int {
 	}
 	measure(m.header)
 	for _, idx := range m.filtered {
-		measure(m.all[idx])
+		measure(m.displayItem(idx))
 	}
 	return widths
 }
