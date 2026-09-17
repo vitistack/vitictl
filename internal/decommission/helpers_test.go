@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	admissionv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	netv1 "k8s.io/api/networking/v1"
@@ -37,7 +38,8 @@ func testScheme(t *testing.T, withIPAlloc, withGateway bool) *runtime.Scheme {
 	t.Helper()
 	sch := runtime.NewScheme()
 	for _, add := range []func(*runtime.Scheme) error{
-		corev1.AddToScheme, appsv1.AddToScheme, netv1.AddToScheme, storagev1.AddToScheme, vitiv1alpha1.AddToScheme,
+		corev1.AddToScheme, appsv1.AddToScheme, netv1.AddToScheme, storagev1.AddToScheme,
+		admissionv1.AddToScheme, vitiv1alpha1.AddToScheme,
 	} {
 		if err := add(sch); err != nil {
 			t.Fatal(err)

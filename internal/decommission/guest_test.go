@@ -8,6 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	netv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -415,5 +416,154 @@ func TestDeletePVCsListFailureIsRecordedAsFailure(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "could not list PVCs") {
 		t.Errorf("output = %q, want it to report the PVC list failure", out.String())
+	}
+}
+
+// --- evictPVCMountingPods -------------------------------------------------
+//
+// A PVC cannot be deleted while a pod still references it, so these pods are
+// the gate in front of every volume this phase has to release.
+
+func pvcPod(ns, name string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
+		Spec: corev1.PodSpec{Volumes: []corev1.Volume{{
+			Name: "data",
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"},
+			},
+		}}},
+	}
+}
+
+func plainPod(ns, name string) *corev1.Pod {
+	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}}
+}
+
+func TestEvictPVCMountingPodsDeletesOnlyPodsHoldingVolumes(t *testing.T) {
+	sch := testScheme(t, false, true)
+	guest := fakeClient(sch,
+		pvcPod("prometheus-operator", "prometheus-kube-prom-stack-0"),
+		plainPod("prometheus-operator", "prometheus-operator-7d9f"),
+	)
+	r, _ := newTestRunner(t, nil, guest)
+
+	r.evictPVCMountingPods(t.Context())
+
+	var pods corev1.PodList
+	if err := guest.List(t.Context(), &pods); err != nil {
+		t.Fatal(err)
+	}
+	if len(pods.Items) != 1 || pods.Items[0].Name != "prometheus-operator-7d9f" {
+		t.Fatalf("remaining pods = %v, want only the pod that holds no volume", pods.Items)
+	}
+	if r.failed {
+		t.Error("r.failed = true, want false when every PVC-mounting pod went")
+	}
+}
+
+// TestEvictPVCMountingPodsCapsTheGracePeriod is the fix for the run this was
+// written after. prometheus-operator ships terminationGracePeriodSeconds:
+// 600 on the Prometheus StatefulSet so it can flush a WAL — and this phase
+// deletes that WAL's storage moments later, so honouring it would spend ten
+// minutes preserving nothing. The delete has to override it.
+func TestEvictPVCMountingPodsCapsTheGracePeriod(t *testing.T) {
+	sch := testScheme(t, false, true)
+	base := fakeClient(sch, pvcPod("prometheus-operator", "prometheus-kube-prom-stack-0"))
+	var grace []int64
+	guest := interceptor.NewClient(base.(ctrlclient.WithWatch), interceptor.Funcs{
+		Delete: func(ctx context.Context, c ctrlclient.WithWatch, obj ctrlclient.Object, opts ...ctrlclient.DeleteOption) error {
+			var o ctrlclient.DeleteOptions
+			o.ApplyOptions(opts)
+			if o.GracePeriodSeconds == nil {
+				t.Error("delete must set an explicit grace period, not inherit the pod's own")
+			} else {
+				grace = append(grace, *o.GracePeriodSeconds)
+			}
+			return c.Delete(ctx, obj, opts...)
+		},
+	})
+	r, _ := newTestRunner(t, nil, guest)
+
+	r.evictPVCMountingPods(t.Context())
+
+	if len(grace) != 1 || grace[0] != podEvictionGrace {
+		t.Fatalf("grace periods used = %v, want exactly [%d]", grace, podEvictionGrace)
+	}
+}
+
+// TestEvictPVCMountingPodsForcesWhenPodsRemain covers the pod that does not
+// go: a wedged node, or a controller putting it back. Everything downstream
+// stalls behind it, so the step escalates to grace 0 rather than proceeding
+// to PVC deletion with the volumes still mounted — and says so, because a
+// forced delete can leave a volume attached.
+func TestEvictPVCMountingPodsForcesWhenPodsRemain(t *testing.T) {
+	sch := testScheme(t, false, true)
+	base := fakeClient(sch, pvcPod("prometheus-operator", "prometheus-kube-prom-stack-0"))
+	var grace []int64
+	guest := interceptor.NewClient(base.(ctrlclient.WithWatch), interceptor.Funcs{
+		Delete: func(_ context.Context, _ ctrlclient.WithWatch, _ ctrlclient.Object, opts ...ctrlclient.DeleteOption) error {
+			var o ctrlclient.DeleteOptions
+			o.ApplyOptions(opts)
+			if o.GracePeriodSeconds != nil {
+				grace = append(grace, *o.GracePeriodSeconds)
+			}
+			return nil // accepted, but the pod stays
+		},
+	})
+	r, out := newTestRunner(t, nil, guest)
+	ctx, cancel := ctxWithCancel(t)
+	cancel()
+
+	r.evictPVCMountingPods(ctx)
+
+	if len(grace) != 2 || grace[0] != podEvictionGrace || grace[1] != 0 {
+		t.Fatalf("grace periods used = %v, want [%d 0] — a capped pass then a forced one", grace, podEvictionGrace)
+	}
+	if !r.failed {
+		t.Error("r.failed = false, want true when pods survive even a forced delete")
+	}
+	if !strings.Contains(out.String(), "leave a volume attached") {
+		t.Errorf("output must name the hazard a forced delete carries, got:\n%s", out)
+	}
+}
+
+// TestEvictPVCMountingPodsSkipsTheWaitWhenThereIsNothingToDo keeps a cluster
+// with no stateful workloads from sitting through the wait — and from being
+// told pods were deleted when none were.
+func TestEvictPVCMountingPodsSkipsTheWaitWhenThereIsNothingToDo(t *testing.T) {
+	sch := testScheme(t, false, true)
+	r, out := newTestRunner(t, nil, fakeClient(sch, plainPod(testNS, "stateless")))
+
+	r.evictPVCMountingPods(t.Context())
+
+	if r.failed {
+		t.Error("r.failed = true, want false when there are no PVC-mounting pods")
+	}
+	if !strings.Contains(out.String(), "no PVC-mounting pods found") {
+		t.Errorf("output = %q, want it to say there was nothing to delete", out)
+	}
+}
+
+// TestEvictPVCMountingPodsListFailureBlocksVerdict — unlike the webhook
+// removal, this step IS a gate: proceeding to delete PVCs without knowing
+// whether a pod still holds them is how a volume gets left behind.
+func TestEvictPVCMountingPodsListFailureBlocksVerdict(t *testing.T) {
+	sch := testScheme(t, false, true)
+	base := fakeClient(sch)
+	guest := interceptor.NewClient(base.(ctrlclient.WithWatch), interceptor.Funcs{
+		List: func(_ context.Context, _ ctrlclient.WithWatch, list ctrlclient.ObjectList, _ ...ctrlclient.ListOption) error {
+			if _, ok := list.(*corev1.PodList); ok {
+				return errBoom
+			}
+			return nil
+		},
+	})
+	r, _ := newTestRunner(t, nil, guest)
+
+	r.evictPVCMountingPods(t.Context())
+
+	if !r.failed {
+		t.Error("r.failed = false, want true after a pod List failure")
 	}
 }

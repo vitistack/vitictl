@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	admissionv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -54,6 +55,7 @@ func (r *Runner) Preflight(ctx context.Context) error {
 			fail("guest API unreachable: %v", err)
 		} else {
 			pass("guest API reachable (via kubeconfig from the cluster's own secret)")
+			r.preflightAdmissionWebhooks(gctx, note)
 			r.preflightROR(gctx, pass, fail, note)
 		}
 	}
@@ -63,6 +65,28 @@ func (r *Runner) Preflight(ctx context.Context) error {
 	}
 	r.printf("🟢 preflight clean — a real run has everything it needs")
 	return nil
+}
+
+// preflightAdmissionWebhooks reports what phase 1 will remove. A real run
+// deletes these unconditionally, so a dry run that said nothing about them
+// would understate what it is about to do. It is not a blocking check —
+// their presence is normal and their removal is the point.
+func (r *Runner) preflightAdmissionWebhooks(ctx context.Context, note func(string, ...any)) {
+	var vals admissionv1.ValidatingWebhookConfigurationList
+	var muts admissionv1.MutatingWebhookConfigurationList
+	if err := r.guest.List(ctx, &vals); err != nil {
+		note("could not list validating webhook configurations (%v) — preclean will still try to remove them", err)
+		return
+	}
+	if err := r.guest.List(ctx, &muts); err != nil {
+		note("could not list mutating webhook configurations (%v) — preclean will still try to remove them", err)
+		return
+	}
+	if len(vals.Items)+len(muts.Items) == 0 {
+		return
+	}
+	note("preclean will delete %d admission webhook configuration(s) — %d validating, %d mutating",
+		len(vals.Items)+len(muts.Items), len(vals.Items), len(muts.Items))
 }
 
 // preflightROR checks the ROR half without purging anything: identity secret

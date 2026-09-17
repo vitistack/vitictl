@@ -41,13 +41,25 @@ var (
 func (r *Runner) preclean(ctx context.Context) error {
 	r.printf("Phase 1: preclean guest cluster %s (external-system cleanup)", r.cluster.Name)
 
+	// First, before any write: a webhook whose backend is dead rejects all of
+	// them. See deleteAdmissionWebhooks.
+	r.printf("Remove admission webhook configurations (a dead policy controller rejects every write)")
+	r.deleteAdmissionWebhooks(ctx)
+
 	r.stopArgoCD(ctx)
+	// Again, now that Argo's controllers are stopped: while they were running
+	// they put back anything they manage, including what was just deleted.
+	if n := r.deleteAdmissionWebhooks(ctx); n > 0 {
+		r.printf("  (%d admission webhook configuration(s) had been re-created by ArgoCD)", n)
+	}
+
 	r.startRORPurge(ctx)
 	r.deleteIngresses(ctx)
 	r.deleteGateways(ctx)
 	r.sweepGatewayAPIConfig(ctx)
 	r.deleteLBServices(ctx)
 	r.scaleDownPVCWorkloads(ctx)
+	r.evictPVCMountingPods(ctx)
 	r.deletePVCsAndWaitVolumes(ctx)
 	r.collectRORResult(ctx)
 
@@ -333,18 +345,94 @@ func (r *Runner) scaleDownPVCWorkloads(ctx context.Context) {
 			r.warnf("pod %s/%s uses a PVC but has unscalable controller %s/%s", pod.Namespace, pod.Name, owner.Kind, owner.Name)
 		}
 	}
-	r.waitUntil(ctx, "PVC-mounting pods terminated", 90*time.Second, 5*time.Second, func(ctx context.Context) (bool, error) {
-		var l corev1.PodList
-		if err := r.guest.List(ctx, &l); err != nil {
-			return false, err
+}
+
+// podEvictionGrace caps how long a PVC-mounting pod gets to shut down.
+//
+// Neither zero nor the pod's own terminationGracePeriodSeconds. Zero removes
+// the pod object from the API while its container may still be running and
+// its volume still mounted, and the CSI driver can then fail to detach —
+// leaking the external volume this whole phase exists to release. The pod's
+// own value errs the other way: prometheus-operator ships 600s on the
+// Prometheus StatefulSet so it can flush a WAL, and this phase deletes that
+// WAL's storage a minute later, so honouring it spends ten minutes
+// preserving nothing.
+//
+// 30s is enough for the kubelet to SIGTERM, SIGKILL and unmount cleanly.
+const podEvictionGrace int64 = 30
+
+// evictPVCMountingPods deletes every pod that mounts a PVC, overriding its
+// grace period, and does not return until they are gone.
+//
+// Scaling the controllers down is not enough on its own. It tells them to
+// stop, but a pod with a long grace period keeps its volume mounted long
+// after, and a PVC cannot be deleted while a pod still references it. The
+// wait this replaces was a flat 90s — shorter than prometheus-operator's own
+// grace period — it only counted pods in Running so a pod stuck Terminating
+// with its volume still attached read as gone, and it discarded its own
+// timeout. So a run would walk into PVC deletion with the pods still up and
+// report leftover PVCs instead of the reason for them.
+func (r *Runner) evictPVCMountingPods(ctx context.Context) {
+	r.printf("Delete pods that mount PVCs (grace %ds — their storage goes next)", podEvictionGrace)
+	if n := r.deletePVCPods(ctx, podEvictionGrace); n == 0 {
+		r.printf("  no PVC-mounting pods found")
+		return
+	}
+	if r.waitUntil(ctx, "PVC-mounting pods gone", 2*time.Minute, 5*time.Second, r.noPVCMountingPods) {
+		return
+	}
+
+	// Still there: a controller put them back, or a node has stopped
+	// answering. Force it — every step after this stalls behind these pods —
+	// and let the VolumeAttachment and PV waits that follow be what proves
+	// the volumes detached anyway.
+	r.warnf("PVC-mounting pods are still present; deleting them with grace 0")
+	r.warnf("  a forced delete can leave a volume attached — the VolumeAttachment and PV waits below are what verify it did not")
+	r.deletePVCPods(ctx, 0)
+	if !r.waitUntil(ctx, "PVC-mounting pods gone (forced)", 60*time.Second, 5*time.Second, r.noPVCMountingPods) {
+		r.failed = true
+	}
+}
+
+// deletePVCPods deletes every pod mounting a PVC with the given grace period
+// in seconds, and returns how many it asked to delete.
+func (r *Runner) deletePVCPods(ctx context.Context, grace int64) int {
+	var pods corev1.PodList
+	if err := r.guest.List(ctx, &pods); err != nil {
+		r.failf("could not list pods: %v", err)
+		return 0
+	}
+	n := 0
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if !podMountsPVC(pod) {
+			continue
 		}
-		for i := range l.Items {
-			if podMountsPVC(&l.Items[i]) && l.Items[i].Status.Phase == corev1.PodRunning {
-				return false, nil
-			}
+		n++
+		if err := ignoreNotFound(r.guest.Delete(ctx, pod, ctrlclient.GracePeriodSeconds(grace))); err != nil {
+			r.failf("failed to delete pod %s/%s: %v", pod.Namespace, pod.Name, err)
 		}
-		return true, nil
-	})
+	}
+	return n
+}
+
+// noPVCMountingPods reports whether every pod that mounts a PVC is gone.
+//
+// Presence is what counts, not phase: a pod stuck Terminating still has its
+// volume mounted, so treating anything other than Running as gone — which is
+// what the old check did — declares success while the volumes are still in
+// use.
+func (r *Runner) noPVCMountingPods(ctx context.Context) (bool, error) {
+	var l corev1.PodList
+	if err := r.guest.List(ctx, &l); err != nil {
+		return false, err
+	}
+	for i := range l.Items {
+		if podMountsPVC(&l.Items[i]) {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // scaleWorkloadToZero patches the workload's operator-CR owner when one
