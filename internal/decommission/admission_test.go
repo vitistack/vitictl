@@ -31,8 +31,9 @@ func TestDeleteAdmissionWebhooksRemovesBothKinds(t *testing.T) {
 	)
 	r, out := newTestRunner(t, nil, guest)
 
-	if n := r.deleteAdmissionWebhooks(t.Context()); n != 3 {
-		t.Fatalf("deleteAdmissionWebhooks() = %d, want 3", n)
+	sweep := r.deleteAdmissionWebhooks(t.Context())
+	if len(sweep.Gone) != 3 || len(sweep.Remaining) != 0 {
+		t.Fatalf("sweep = %+v, want 3 gone and none remaining", sweep)
 	}
 
 	var vals admissionv1.ValidatingWebhookConfigurationList
@@ -54,8 +55,8 @@ func TestDeleteAdmissionWebhooksIsQuietWhenThereAreNone(t *testing.T) {
 	sch := testScheme(t, false, false)
 	r, out := newTestRunner(t, nil, fakeClient(sch))
 
-	if n := r.deleteAdmissionWebhooks(t.Context()); n != 0 {
-		t.Fatalf("deleteAdmissionWebhooks() = %d, want 0", n)
+	if sweep := r.deleteAdmissionWebhooks(t.Context()); len(sweep.Gone) != 0 || len(sweep.Remaining) != 0 {
+		t.Fatalf("sweep = %+v, want empty", sweep)
 	}
 	if out.String() != "" {
 		t.Errorf("output = %q, want empty when there is nothing to remove", out)
@@ -204,5 +205,108 @@ func TestPrecleanRemovesWebhooksBeforeAnyOtherWrite(t *testing.T) {
 	}
 	if ops[0] != "delete-webhook" {
 		t.Errorf("first write = %q, want the webhook removal; full order: %v", ops[0], ops)
+	}
+}
+
+// TestDeleteAdmissionWebhooksVerifiesRemovalRatherThanClaimingIt covers a
+// configuration held in Terminating by a finalizer. The API accepted the
+// delete, but the API server keeps consulting a webhook configuration until
+// it actually leaves storage — so it still rejects the writes this step
+// exists to unblock, and reporting it as deleted would send the operator
+// looking anywhere but at the real cause.
+func TestDeleteAdmissionWebhooksVerifiesRemovalRatherThanClaimingIt(t *testing.T) {
+	sch := testScheme(t, false, false)
+	stuck := validatingWebhook("kyverno-resource-validating-webhook-cfg")
+	stuck.Finalizers = []string{"kyverno.io/cleanup"}
+	guest := fakeClient(sch, stuck, mutatingWebhook("clean-cfg"))
+	r, out := newTestRunner(t, nil, guest)
+
+	sweep := r.deleteAdmissionWebhooks(t.Context())
+
+	if len(sweep.Remaining) != 1 || sweep.Remaining[0] != "validatingwebhookconfiguration/kyverno-resource-validating-webhook-cfg" {
+		t.Fatalf("Remaining = %v, want the finalizer-held configuration", sweep.Remaining)
+	}
+	if len(sweep.Gone) != 1 || sweep.Gone[0] != "mutatingwebhookconfiguration/clean-cfg" {
+		t.Fatalf("Gone = %v, want only the one that actually went", sweep.Gone)
+	}
+	if strings.Contains(out.String(), "Deleted validatingwebhookconfiguration/kyverno-resource") {
+		t.Errorf("a configuration still present must not be reported as deleted, got:\n%s", out)
+	}
+	if !strings.Contains(out.String(), "still present after an accepted delete") {
+		t.Errorf("output must report the configuration that did not go, got:\n%s", out)
+	}
+}
+
+// TestReappearedDistinguishesRecreationFromAStuckFinalizer keeps the second
+// pass honest. A configuration the first pass never managed to remove is
+// still there for its own reason; calling that an ArgoCD re-creation sends
+// the reader to the wrong place entirely.
+func TestReappearedDistinguishesRecreationFromAStuckFinalizer(t *testing.T) {
+	first := webhookSweep{
+		Gone:      []string{"validatingwebhookconfiguration/went"},
+		Remaining: []string{"validatingwebhookconfiguration/stuck"},
+	}
+	tests := []struct {
+		name  string
+		later webhookSweep
+		want  int
+	}{
+		{
+			name:  "the stuck one is not a re-creation",
+			later: webhookSweep{Remaining: []string{"validatingwebhookconfiguration/stuck"}},
+			want:  0,
+		},
+		{
+			name:  "one that had gone and is back was re-created",
+			later: webhookSweep{Gone: []string{"validatingwebhookconfiguration/went"}},
+			want:  1,
+		},
+		{
+			name: "mixed",
+			later: webhookSweep{
+				Gone:      []string{"validatingwebhookconfiguration/went"},
+				Remaining: []string{"validatingwebhookconfiguration/stuck", "mutatingwebhookconfiguration/new"},
+			},
+			want: 2,
+		},
+		{name: "nothing found", later: webhookSweep{}, want: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := reappeared(tc.later, first); got != tc.want {
+				t.Errorf("reappeared() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDeleteAdmissionWebhooksUnverifiableRemovalIsNotClaimedAsGone: when the
+// verification read fails there is no evidence either way, and the honest
+// answer is the one that does not let a later message claim a re-creation.
+func TestDeleteAdmissionWebhooksUnverifiableRemovalIsNotClaimedAsGone(t *testing.T) {
+	sch := testScheme(t, false, false)
+	base := fakeClient(sch, validatingWebhook("kyverno-resource-validating-webhook-cfg"))
+	calls := 0
+	guest := interceptor.NewClient(base.(ctrlclient.WithWatch), interceptor.Funcs{
+		List: func(ctx context.Context, c ctrlclient.WithWatch, list ctrlclient.ObjectList, opts ...ctrlclient.ListOption) error {
+			calls++
+			if calls > 2 { // the two reads of the verification pass
+				return errBoom
+			}
+			return c.List(ctx, list, opts...)
+		},
+	})
+	r, out := newTestRunner(t, nil, guest)
+
+	sweep := r.deleteAdmissionWebhooks(t.Context())
+
+	if len(sweep.Gone) != 0 {
+		t.Errorf("Gone = %v, want none — removal was never verified", sweep.Gone)
+	}
+	if len(sweep.Remaining) != 1 {
+		t.Errorf("Remaining = %v, want the unverified configuration", sweep.Remaining)
+	}
+	if !strings.Contains(out.String(), "could not verify") {
+		t.Errorf("output must say verification failed, got:\n%s", out)
 	}
 }

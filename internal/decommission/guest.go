@@ -41,16 +41,16 @@ var (
 func (r *Runner) preclean(ctx context.Context) error {
 	r.printf("Phase 1: preclean guest cluster %s (external-system cleanup)", r.cluster.Name)
 
-	// First, before any write: a webhook whose backend is dead rejects all of
+	// First, before any write: an unreachable webhook would reject all of
 	// them. See deleteAdmissionWebhooks.
-	r.printf("Remove admission webhook configurations (a dead policy controller rejects every write)")
-	r.deleteAdmissionWebhooks(ctx)
+	r.printf("Delete all admission webhook configurations")
+	first := r.deleteAdmissionWebhooks(ctx)
 
 	r.stopArgoCD(ctx)
 	// Again, now that Argo's controllers are stopped: while they were running
 	// they put back anything they manage, including what was just deleted.
-	if n := r.deleteAdmissionWebhooks(ctx); n > 0 {
-		r.printf("  (%d admission webhook configuration(s) had been re-created by ArgoCD)", n)
+	if n := reappeared(r.deleteAdmissionWebhooks(ctx), first); n > 0 {
+		r.printf("  (%d admission webhook configuration(s) were re-created while ArgoCD was still running)", n)
 	}
 
 	r.startRORPurge(ctx)

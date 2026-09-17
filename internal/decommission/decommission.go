@@ -201,6 +201,14 @@ func (r *Runner) Run(ctx context.Context) error {
 // leaving the KubernetesCluster and its VMs untouched — for decommissions
 // where the irreversible deletion happens later (e.g. in a change window).
 // Re-runnable: a clean verdict stays clean on repeat runs.
+//
+// The VMs keep running, but the guest does not survive this in any useful
+// sense and there is no way back from it: phase 1 deletes every PVC and
+// every PV in the cluster, every Ingress, Gateway and LoadBalancer service,
+// every admission webhook configuration, and deregisters the cluster from
+// ROR. What is left is a husk waiting for phase 2, with no storage and no
+// admission enforcement. Anything that runs between the two phases runs
+// unpoliced — which is why nothing should.
 func (r *Runner) RunPreclean(ctx context.Context) error {
 	if r.guest == nil {
 		return fmt.Errorf("no guest client — preclean needs the guest cluster to be reachable")
