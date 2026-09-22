@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -403,13 +402,23 @@ removing control plane nodes requires typing the cluster name back; scaling a
 pool that has autoscaling enabled warns first. A count equal to the current
 one writes nothing at all.
 
+Beyond replica counts, --add-nodepool clones an existing pool into a new one
+(unique generated name, machine class and replicas of your choosing) and
+--delete-nodepool removes a pool. Both print the exact nodePools entry being
+written before asking. Deleting a pool deletes its worker machines, so it
+requires typing the pool name back; deleting the last remaining worker pool
+is always refused.
+
 Examples:
   viti kc scale                                  # pick cluster, then target
   viti kc scale my-cluster                       # pick the target
   viti kc scale my-cluster --nodepool workers=5
   viti kc scale my-cluster --nodepool workers=+2
   viti kc scale my-cluster --controlplane 3
-  viti kc scale my-cluster --cp 3 --np workers=6 --np gpu=-1`,
+  viti kc scale my-cluster --cp 3 --np workers=6 --np gpu=-1
+  viti kc scale my-cluster --add-nodepool        # pick template, class, count
+  viti kc scale my-cluster --add-nodepool --from-pool workers --machineclass xlcpu --replicas 3
+  viti kc scale my-cluster --delete-nodepool gpu`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := ""
@@ -424,6 +433,9 @@ Examples:
 		// Cheapest checks first: a bad flag must not cost a fleet-wide lookup.
 		npFlags := scaleNodePoolFlags()
 		if err := checkScaleFlags(kcScaleControlPlane, npFlags); err != nil {
+			return err
+		}
+		if err := checkPoolEditFlags(currentPoolEditFlags(cmd), kcScaleControlPlane, npFlags, picker.Interactive()); err != nil {
 			return err
 		}
 
@@ -443,6 +455,29 @@ Examples:
 			return err
 		}
 
+		// One terminal session for the whole interactive flow: cluster pick,
+		// target pick, and every popup share it, so nothing flashes between
+		// steps. Opened lazily so a fully flag-driven run never touches the
+		// terminal, and closed before anything prints or prompts on stdio.
+		var sess *picker.Session
+		ensureSession := func() (*picker.Session, error) {
+			if sess != nil {
+				return sess, nil
+			}
+			s, err := picker.NewSession()
+			if err != nil {
+				return nil, err
+			}
+			sess = s
+			return sess, nil
+		}
+		closeSession := func() {
+			if sess != nil {
+				sess.Close()
+			}
+		}
+		defer closeSession()
+
 		var hit *kcHit
 		if name != "" {
 			// A mutation must not act on a name that a zone we could not
@@ -452,10 +487,28 @@ Examples:
 			}
 			hit, err = findClusterAcrossAZs(ctx, clients, name, kcScaleNamespace)
 		} else {
-			hit, err = pickClusterToScale(ctx, clients)
+			var s *picker.Session
+			s, err = ensureSession()
+			if err != nil {
+				return err
+			}
+			hit, err = pickClusterToScale(ctx, s, clients)
 		}
 		if err != nil {
 			return err
+		}
+
+		out := cmd.OutOrStdout()
+
+		// Pool edits run their own plan/confirm/patch sequence — the session
+		// must be closed first: the plan and the prompts use plain stdio.
+		if poolEditRequested() {
+			edit, err := resolvePoolEditFromFlags(ctx, ensureSession, hit)
+			closeSession()
+			if err != nil {
+				return err
+			}
+			return runPoolEdit(ctx, cmd, hit, *edit)
 		}
 
 		changes, err := resolveChanges(hit.cluster, kcScaleControlPlane, npFlags)
@@ -463,14 +516,22 @@ Examples:
 			return err
 		}
 		if len(changes) == 0 {
-			changes, err = promptForChange(cmd, hit.cluster)
+			var edit *poolEdit
+			changes, edit, err = promptForChange(ctx, ensureSession, hit)
 			if err != nil {
 				return err
 			}
+			if edit != nil {
+				closeSession()
+				return runPoolEdit(ctx, cmd, hit, *edit)
+			}
 		}
 
+		// The plan, the confirmation prompt, and the patch output all use the
+		// plain terminal.
+		closeSession()
+
 		actionable, noops := partitionChanges(changes)
-		out := cmd.OutOrStdout()
 		writeScalePlan(out, hit.client.AZ.Name, hit.cluster.Namespace, hit.cluster.Name, actionable, noops)
 
 		if len(actionable) == 0 {
@@ -507,7 +568,7 @@ Examples:
 }
 
 // pickClusterToScale shows every cluster in scope and returns the chosen one.
-func pickClusterToScale(ctx context.Context, clients []*kube.Client) (*kcHit, error) {
+func pickClusterToScale(ctx context.Context, sess *picker.Session, clients []*kube.Client) (*kcHit, error) {
 	hits := collectClusters(ctx, clients, kcScaleNamespace)
 	if len(hits) == 0 {
 		return nil, errors.New("🤷 no kubernetesclusters found")
@@ -532,7 +593,7 @@ func pickClusterToScale(ctx context.Context, clients []*kube.Client) (*kcHit, er
 			Value:   &hits[i],
 		})
 	}
-	chosen, err := picker.Select(" Select a cluster to scale ",
+	chosen, err := sess.Select(" Select a cluster to scale ",
 		[]string{"AZ", "NAMESPACE", "NAME", "CLUSTER ID", "PROVIDER", "ENV", "PHASE", "CP", "POOLS"}, items)
 	if err != nil {
 		if errors.Is(err, picker.ErrCancelled) {
@@ -547,34 +608,104 @@ func pickClusterToScale(ctx context.Context, clients []*kube.Client) (*kcHit, er
 	return got, nil
 }
 
+// scaleAction is what the interactive target picker resolves to: a replica
+// change on the chosen target, or one of the pool edits.
+type scaleAction int
+
+const (
+	actionScaleReplicas scaleAction = iota
+	actionAddPool
+	actionDeletePool
+)
+
 // promptForChange resolves the target and count interactively, for a run that
-// named neither on the command line.
-func promptForChange(cmd *cobra.Command, kc *vitiv1alpha1.KubernetesCluster) ([]scaleChange, error) {
+// named neither on the command line. Choosing one of the pool-edit rows
+// returns a poolEdit instead of changes.
+//
+// It loops: backing out of a popup (Esc) returns to the target picker rather
+// than aborting the command, so a wrong turn costs one keystroke, not a
+// re-run. Only cancelling the target picker itself aborts.
+func promptForChange(ctx context.Context, ensure func() (*picker.Session, error), hit *kcHit) ([]scaleChange, *poolEdit, error) {
 	if !picker.Interactive() {
-		return nil, errors.New("no target given — pass --controlplane <count> and/or --nodepool <pool>=<count>, " +
+		return nil, nil, errors.New("no target given — pass --controlplane <count> and/or --nodepool <pool>=<count>, " +
 			"or run in a terminal to pick one interactively")
 	}
-	target, err := pickScaleTarget(kc)
+	sess, err := ensure()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	count, err := promptCount(cmd, target)
-	if err != nil {
-		return nil, err
+	kc := hit.cluster
+	for {
+		target, action, err := pickScaleTarget(sess, kc)
+		if err != nil {
+			return nil, nil, err
+		}
+		switch action {
+		case actionAddPool:
+			edit, err := resolveAddPool(ctx, ensure, hit)
+			if errors.Is(err, picker.ErrCancelled) {
+				continue // backed out of the first step: the target list again
+			}
+			return nil, edit, err
+		case actionDeletePool:
+			pools := kc.Spec.Topology.Workers.NodePools
+			if len(pools) == 0 {
+				return nil, nil, errors.New("this cluster declares no node pools — there is nothing to delete")
+			}
+			if len(pools) == 1 {
+				return nil, nil, errLastPool(pools[0].Name)
+			}
+			i, err := pickPool(sess, kc, " Select the pool to delete from "+kc.Name+" ")
+			if errors.Is(err, picker.ErrCancelled) {
+				continue
+			}
+			if err != nil {
+				return nil, nil, err
+			}
+			return nil, &poolEdit{kind: poolEditDelete, poolName: pools[i].Name, poolIndex: i}, nil
+		}
+
+		prompt := fmt.Sprintf("%s currently has %d replicas", target.label(), target.current)
+		answer, err := sess.Input(" New replica count ", prompt, "e.g. 5, +2, -1", validateCountFor(target))
+		if errors.Is(err, picker.ErrCancelled) {
+			continue
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		count, err := parseCount(answer)
+		if err != nil {
+			return nil, nil, err
+		}
+		ch, err := newChange(target, count)
+		if err != nil {
+			return nil, nil, err
+		}
+		return []scaleChange{ch}, nil, nil
 	}
-	ch, err := newChange(target, count)
-	if err != nil {
-		return nil, err
+}
+
+// validateCountFor judges an answer against a target while it is being typed
+// into the popup, so "4 is even" or "cannot scale below zero" appears inline
+// instead of after the terminal is torn down.
+func validateCountFor(target scaleTarget) func(string) error {
+	return func(v string) error {
+		c, err := parseCount(v)
+		if err != nil {
+			return err
+		}
+		_, err = newChange(target, c)
+		return err
 	}
-	return []scaleChange{ch}, nil
 }
 
 // pickScaleTarget shows the control plane and every node pool, so choosing
 // between workers and the control plane is the same act as choosing between
-// two pools.
-func pickScaleTarget(kc *vitiv1alpha1.KubernetesCluster) (scaleTarget, error) {
+// two pools. Below the targets sit the two pool-edit actions, so adding or
+// deleting a pool starts from the same picker as scaling one.
+func pickScaleTarget(sess *picker.Session, kc *vitiv1alpha1.KubernetesCluster) (scaleTarget, scaleAction, error) {
 	targets := clusterTargets(kc)
-	items := make([]picker.Item, 0, len(targets))
+	items := make([]picker.Item, 0, len(targets)+2)
 	for _, t := range targets {
 		autoscaling := "-"
 		if t.autoscaling {
@@ -589,19 +720,35 @@ func pickScaleTarget(kc *vitiv1alpha1.KubernetesCluster) (scaleTarget, error) {
 			Value:   t,
 		})
 	}
-	chosen, err := picker.Select(" Select what to scale in "+kc.Name+" ",
+	for _, a := range []struct {
+		label  string
+		action scaleAction
+	}{
+		{"➕ add a node pool", actionAddPool},
+		{"🗑  delete a node pool", actionDeletePool},
+	} {
+		items = append(items, picker.Item{
+			Label:   a.label,
+			Columns: []string{a.label, "", "", ""},
+			Value:   a.action,
+		})
+	}
+	chosen, err := sess.Select(" Select what to scale in "+kc.Name+" ",
 		[]string{"TARGET", "REPLICAS", "MACHINE CLASS", "AUTOSCALING"}, items)
 	if err != nil {
 		if errors.Is(err, picker.ErrCancelled) {
-			return scaleTarget{}, errors.New("aborted")
+			return scaleTarget{}, actionScaleReplicas, errors.New("aborted")
 		}
-		return scaleTarget{}, err
+		return scaleTarget{}, actionScaleReplicas, err
 	}
-	got, ok := chosen.Value.(scaleTarget)
-	if !ok {
-		return scaleTarget{}, fmt.Errorf("picker returned an unexpected item %T", chosen.Value)
+	switch v := chosen.Value.(type) {
+	case scaleTarget:
+		return v, actionScaleReplicas, nil
+	case scaleAction:
+		return scaleTarget{}, v, nil
+	default:
+		return scaleTarget{}, actionScaleReplicas, fmt.Errorf("picker returned an unexpected item %T", chosen.Value)
 	}
-	return got, nil
 }
 
 // verifyTargetsUnchanged checks that every target still holds the replica
@@ -712,20 +859,6 @@ func confirmScale(cmd *cobra.Command, name string, actionable []scaleChange) err
 		return errors.New("aborted")
 	}
 	return nil
-}
-
-// promptCount asks for the new count, naming the target and its current
-// value so the answer is given with the starting point in view.
-func promptCount(cmd *cobra.Command, target scaleTarget) (countSpec, error) {
-	out := cmd.OutOrStdout()
-	_, _ = fmt.Fprintf(out, "%s currently has %d replicas\n", target.label(), target.current)
-	_, _ = fmt.Fprint(out, "new count (e.g. 5, +2, -1): ")
-	line, err := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
-	// A final answer without a trailing newline still counts.
-	if err != nil && line == "" {
-		return countSpec{}, fmt.Errorf("reading the replica count: %w", err)
-	}
-	return parseCount(line)
 }
 
 func init() {

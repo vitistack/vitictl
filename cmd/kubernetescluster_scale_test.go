@@ -553,9 +553,16 @@ func resetScaleFlags(t *testing.T) {
 	kcScaleControlPlane = ""
 	kcScaleNodePools = nil
 	kcScaleNodePoolsAlias = nil
+	kcScaleAddNodePool = false
+	kcScaleDeleteNodePool = ""
+	kcScaleFromPool = ""
+	kcScaleMachineClass = ""
+	kcScaleReplicas = ""
+	kcScalePoolName = ""
 	// Clearing Changed is what lets the next ParseFlags start from scratch:
 	// a string-array flag only resets its target on its first Set.
-	for _, name := range []string{"controlplane", "cp", "nodepool", "np"} {
+	for _, name := range []string{"controlplane", "cp", "nodepool", "np",
+		"add-nodepool", "delete-nodepool", "from-pool", "machineclass", "replicas", "name"} {
 		if f := kcScaleCmd.Flags().Lookup(name); f != nil {
 			f.Changed = false
 		}
@@ -715,27 +722,28 @@ func TestConfirmScaleUsesTheWeakerPromptForAControlPlaneScaleUp(t *testing.T) {
 	}
 }
 
-func TestPromptCountNamesTheTargetAndItsCurrentValue(t *testing.T) {
-	c, out := scaleConfirmCmd("+2\n")
-	got, err := promptCount(c, scaleTarget{kind: targetNodePool, name: "wp", current: 2})
-	if err != nil {
-		t.Fatalf("promptCount returned an error: %v", err)
-	}
-	if !got.delta || got.value != 2 {
-		t.Errorf("promptCount read %+v, want a delta of 2", got)
-	}
-	for _, want := range []string{"wp", "2"} {
-		if !strings.Contains(out.String(), want) {
-			t.Errorf("the prompt must show %q so the answer is given with the starting point in view, got: %q",
-				want, out.String())
+func TestValidateCountForJudgesTheAnswerAgainstTheTarget(t *testing.T) {
+	worker := scaleTarget{kind: targetNodePool, name: "wp", current: 2}
+	validate := validateCountFor(worker)
+	for _, ok := range []string{"5", "+2", "-1"} {
+		if err := validate(ok); err != nil {
+			t.Errorf("%q must be accepted for a worker pool, got: %v", ok, err)
 		}
 	}
-}
+	for _, bad := range []string{"lots", "", "-3"} {
+		if err := validate(bad); err == nil {
+			t.Errorf("%q must be refused rather than resolve to something unintended", bad)
+		}
+	}
 
-func TestPromptCountRejectsAnUnreadableAnswer(t *testing.T) {
-	c, _ := scaleConfirmCmd("lots\n")
-	if _, err := promptCount(c, scaleTarget{kind: targetNodePool, name: "wp", current: 2}); err == nil {
-		t.Error("an unreadable answer must fail rather than resolve to something unintended")
+	// The popup validator must catch what the CRD would reject, so the error
+	// shows inline instead of after the terminal is restored.
+	cp := scaleTarget{kind: targetControlPlane, index: -1, current: 3}
+	if err := validateCountFor(cp)("4"); err == nil {
+		t.Error("an even control plane count must be refused inline")
+	}
+	if err := validateCountFor(cp)("5"); err != nil {
+		t.Errorf("an odd control plane count must be accepted, got: %v", err)
 	}
 }
 
