@@ -91,6 +91,28 @@ func WriteYAML(w io.Writer, objs []runtime.Object) error {
 	return err
 }
 
+// WriteJSONValue serializes any value as indented JSON. It is for command
+// reports that are not Kubernetes objects and so carry no kind envelope.
+func WriteJSONValue(w io.Writer, v any) error {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(w, string(data))
+	return err
+}
+
+// WriteYAMLValue serializes any value as YAML, through its JSON form so the
+// field names match WriteJSONValue exactly.
+func WriteYAMLValue(w io.Writer, v any) error {
+	data, err := yaml.Marshal(v)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(data)
+	return err
+}
+
 func listEnvelope(objs []runtime.Object) map[string]any {
 	return map[string]any{
 		"apiVersion": "v1",

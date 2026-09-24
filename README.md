@@ -142,6 +142,18 @@ viti kubernetescluster get <name> [-n namespace] [-o ...]
 viti kubernetescluster search [query] [-n namespace] [-o ...]
 viti kc list -o yaml
 
+# Capacity report: control plane and every node pool with replicas, machine
+# class, CPU/memory per node and per pool, plus totals split into control
+# plane / workers / cluster. Sizes come from the MachineClass objects of the
+# cluster's own zone; a class the zone lacks shows as "?" and makes the
+# affected totals a lower bound ("≥") rather than a silent zero.
+# Several clusters per run: name them, use --all, or pick interactively
+# (Tab marks, Enter confirms). One name → a single JSON/YAML object; several
+# names, --all or the picker → a list.
+viti kc info [name...] [--all] [-n namespace] [-z zone] [-o json|yaml]
+viti kc info cluster-a cluster-b
+viti kc info --all -o json | jq '.[] | {name, cpu: .totals.workers.cpu}'
+
 # Extract cluster config artifacts (output dir defaults to ./<clusterId>).
 # Here -o is an output directory (not a format) since get-config writes files.
 # Disambiguate with --az and/or -n/--namespace if the name exists on multiple
