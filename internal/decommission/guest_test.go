@@ -765,3 +765,59 @@ func TestDeletePVCsDoesNotReleaseOnAPVLookupError(t *testing.T) {
 		t.Fatalf("VolumeAttachments = %d, want the orphan kept while its PV cannot be read", len(vas.Items))
 	}
 }
+
+// TestScaleDownTellsSameNamedOwnersFromDifferentGroupsApart: two operators
+// can each call their resource Cluster. De-duplicating on kind and name
+// alone would delete the first and skip the second, whose operator would
+// then keep its PVC-mounting pods alive.
+func TestScaleDownTellsSameNamedOwnersFromDifferentGroupsApart(t *testing.T) {
+	sch := testScheme(t, false, true)
+	registerUnstructured(sch, schema.GroupVersionKind{Group: "postgresql.cnpg.io", Version: "v1", Kind: "ClusterList"})
+	registerUnstructured(sch, schema.GroupVersionKind{Group: "redis.example.io", Version: "v1", Kind: "ClusterList"})
+	pg := customObject("postgresql.cnpg.io/v1", "Cluster", "db", "main")
+	redis := customObject("redis.example.io/v1", "Cluster", "db", "main")
+	guest := fakeClient(sch, pg, redis,
+		ownedPVCPod("db", "main-1", ownerRef("postgresql.cnpg.io/v1", "Cluster", "main")),
+		ownedPVCPod("db", "main-redis-0", ownerRef("redis.example.io/v1", "Cluster", "main")),
+	)
+	r, _ := newTestRunner(t, nil, guest)
+
+	r.scaleDownPVCWorkloads(t.Context())
+
+	for _, o := range []*unstructured.Unstructured{pg, redis} {
+		probe := customObject(o.GetAPIVersion(), o.GetKind(), "", "")
+		if err := guest.Get(t.Context(), ctrlclient.ObjectKeyFromObject(o), probe); !apierrors.IsNotFound(err) {
+			t.Errorf("%s Cluster db/main: err = %v, want NotFound — both same-named owners must be deleted", o.GetAPIVersion(), err)
+		}
+	}
+}
+
+// TestDeletePVCsLeavesAVolumeAttachmentKubernetesHasNotAskedToDetach: the
+// release only completes a detach the attach/detach controller has already
+// requested (deletionTimestamp set) and the attacher can no longer perform.
+// A live attachment is never turned into a detach here, whatever the PV
+// lookup says.
+func TestDeletePVCsLeavesAVolumeAttachmentKubernetesHasNotAskedToDetach(t *testing.T) {
+	sch := testScheme(t, false, true)
+	va := volumeAttachment("csi-attached")
+	pvName := "pvc-gone"
+	va.Spec.Source.PersistentVolumeName = &pvName
+	va.Finalizers = []string{"external-attacher/rook-ceph-rbd-csi-ceph-com"}
+	guest := fakeClient(sch, va)
+	r, out := newTestRunner(t, nil, guest)
+
+	ctx, cancel := ctxWithCancel(t)
+	cancel()
+	r.deletePVCsAndWaitVolumes(ctx)
+
+	got := &storagev1.VolumeAttachment{}
+	if err := guest.Get(t.Context(), ctrlclient.ObjectKeyFromObject(va), got); err != nil {
+		t.Fatalf("VolumeAttachment must survive untouched, got err = %v", err)
+	}
+	if got.DeletionTimestamp != nil || len(got.Finalizers) != 1 {
+		t.Fatalf("VolumeAttachment was modified: deletionTimestamp=%v finalizers=%v", got.DeletionTimestamp, got.Finalizers)
+	}
+	if strings.Contains(out.String(), "Releasing") {
+		t.Errorf("output claims a release that must not happen:\n%s", out)
+	}
+}

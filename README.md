@@ -247,12 +247,15 @@ volume or address it represents stays allocated. If a wait times out the run
 is reported NOT CLEAN and stops: investigate the vitistack operators on the
 management cluster rather than forcing the objects away.
 
-The one exception is a VolumeAttachment whose PersistentVolume no longer
-exists. The CSI attacher needs the PV to detach, so such an attachment sits
-Terminating forever with `persistentvolume "…" not found`, and the volume it
-guarded was already deleted with the PV. Preclean removes these, finalizer
-included, and says so. An attachment whose PV exists, or whose PV merely
-cannot be read at that moment, is never touched.
+The one exception is a VolumeAttachment that Kubernetes has already asked to
+detach (it is Terminating) but whose PersistentVolume no longer exists. The
+CSI attacher needs the PV to detach, so such an attachment sits Terminating
+forever with `persistentvolume "…" not found`. What its finalizer guards is
+the node-side attachment, which phase 2 destroys with the node; the backing
+volume was already deleted or deliberately retained when the PV went, and the
+attachment holds nothing that could recover it. Preclean removes the
+finalizer from these and says so. A live attachment, one whose PV exists, or
+one whose PV merely cannot be read at that moment, is never touched.
 
 ### Machines (alias: `m`) — dashboard
 

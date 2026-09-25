@@ -345,7 +345,9 @@ func (r *Runner) scaleDownPVCWorkloads(ctx context.Context) {
 			// A mirror pod. Its Node is not a workload controller.
 			r.warnf("pod %s/%s uses a PVC but is owned by Node %s — cannot scale down", pod.Namespace, pod.Name, owner.Name)
 		default:
-			key := pod.Namespace + "/" + owner.Kind + "/" + owner.Name
+			// The API version is part of the identity: two operators can
+			// both call their resource Cluster.
+			key := pod.Namespace + "/" + owner.APIVersion + "/" + owner.Kind + "/" + owner.Name
 			if seen[key] {
 				continue
 			}
@@ -570,19 +572,30 @@ func (r *Runner) deletePVCsAndWaitVolumes(ctx context.Context) {
 	})
 }
 
-// releaseOrphanedVolumeAttachment removes a VolumeAttachment whose PV no
-// longer exists, finalizer included, and reports whether it did.
+// releaseOrphanedVolumeAttachment completes the deletion of a
+// VolumeAttachment that Kubernetes has already asked to detach but whose PV
+// no longer exists, by removing the finalizer, and reports whether it did.
 //
-// This is the one finalizer preclean strips, and the reason is specific. A
-// CSI external-attacher detaches by reading the PV the attachment names; when
-// the PV is gone it cannot, records detachError "persistentvolume not found",
-// and leaves its finalizer in place forever. The run this was written after
-// found eight of them, months old, and the detach wait can never end while
-// one exists. The volume the finalizer guarded was deleted together with its
-// PV, so there is nothing left for the finalizer to protect. Anything else —
-// a PV that is present, or one that merely cannot be read right now — is
-// left strictly alone.
+// This is the one finalizer preclean strips, and the conditions are narrow.
+// The attach/detach controller must already have deleted the attachment
+// (deletionTimestamp set): a live attachment is never turned into a detach
+// here. And the PV it names must be absent. A CSI external-attacher
+// detaches by reading that PV; without it the detach cannot be issued, the
+// attacher records detachError "persistentvolume not found", and the
+// finalizer stays forever. The run this was written after found eight of
+// them, months old, and the detach wait can never end while one exists.
+//
+// What the finalizer guards is the node-side attachment, and the node is
+// destroyed in phase 2. The backing volume is not at stake: the PV's own
+// protection finalizer means the PV is only ever gone after its claim was
+// released, so by then the volume was either deleted by the provisioner or
+// kept on purpose by a Retain policy — and the attachment object holds no
+// handle that could recover it either way. A PV that is present, or one
+// that merely cannot be read right now, leaves the attachment untouched.
 func (r *Runner) releaseOrphanedVolumeAttachment(ctx context.Context, va *storagev1.VolumeAttachment) (bool, error) {
+	if va.DeletionTimestamp == nil || len(va.Finalizers) == 0 {
+		return false, nil
+	}
 	pvName := va.Spec.Source.PersistentVolumeName
 	if pvName == nil || *pvName == "" {
 		return false, nil
@@ -598,10 +611,7 @@ func (r *Runner) releaseOrphanedVolumeAttachment(ctx context.Context, va *storag
 	if va.Status.DetachError != nil {
 		detail = " (attacher: " + va.Status.DetachError.Message + ")"
 	}
-	r.printf("  Releasing VolumeAttachment %s: its PV %s no longer exists, so the CSI attacher can never detach it%s", va.Name, *pvName, detail)
-	if err := ignoreNotFound(r.guest.Delete(ctx, va)); err != nil {
-		return false, fmt.Errorf("delete VolumeAttachment %s: %w", va.Name, err)
-	}
+	r.printf("  Releasing VolumeAttachment %s: detaching since %s, but its PV %s no longer exists so the CSI attacher can never finish%s", va.Name, va.DeletionTimestamp.Format(time.RFC3339), *pvName, detail)
 	patch := []byte(`{"metadata":{"finalizers":null}}`)
 	if err := ignoreNotFound(r.guest.Patch(ctx, va, ctrlclient.RawPatch(types.MergePatchType, patch))); err != nil {
 		return false, fmt.Errorf("strip finalizers from VolumeAttachment %s: %w", va.Name, err)
