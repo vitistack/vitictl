@@ -193,8 +193,12 @@ viti kc etcd-restore <name> --from ./snap.bin [--node <addr>] [--yes] [--skip-ha
 *inside* the guest so external systems release what they are holding —
 ArgoCD is stopped so nothing self-heals mid-teardown, ingresses, Gateways and
 LoadBalancer services are deleted so the IPAM and DNS operators release
-addresses and records, PVCs are deleted and waited on until the CSI driver has
-removed the real volumes, and the cluster is deregistered from ROR. Phase 2
+addresses and records, stateful workloads are stopped (Deployments and
+StatefulSets are scaled to zero; a workload owned by an operator's own
+resource, such as a CloudNativePG `Cluster` or a Strimzi `Kafka`, has that
+resource deleted so the operator releases its pods and PVCs), PVCs are deleted
+and waited on until the CSI driver has removed the real volumes, and the
+cluster is deregistered from ROR. Phase 2
 runs **only if phase 1 is verifiably clean**, and deletes the
 KubernetesCluster CR, then watches the operator tear down the VMs, network
 configuration, API VIP and node-IP allocations until they are verifiably gone.
@@ -242,6 +246,16 @@ teardown mechanism, and removing one makes the object disappear while the VM,
 volume or address it represents stays allocated. If a wait times out the run
 is reported NOT CLEAN and stops: investigate the vitistack operators on the
 management cluster rather than forcing the objects away.
+
+The one exception is a VolumeAttachment that Kubernetes has already asked to
+detach (it is Terminating) but whose PersistentVolume no longer exists. The
+CSI attacher needs the PV to detach, so such an attachment sits Terminating
+forever with `persistentvolume "…" not found`. What its finalizer guards is
+the node-side attachment, which phase 2 destroys with the node; the backing
+volume was already deleted or deliberately retained when the PV went, and the
+attachment holds nothing that could recover it. Preclean removes the
+finalizer from these and says so. A live attachment, one whose PV exists, or
+one whose PV merely cannot be read at that moment, is never touched.
 
 ### Machines (alias: `m`) — dashboard
 
