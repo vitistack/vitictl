@@ -7,6 +7,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	netv1 "k8s.io/api/networking/v1"
+	storagev1 "k8s.io/api/storage/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -565,5 +567,201 @@ func TestEvictPVCMountingPodsListFailureBlocksVerdict(t *testing.T) {
 
 	if !r.failed {
 		t.Error("r.failed = false, want true after a pod List failure")
+	}
+}
+
+// --- scaleDownPVCWorkloads: owners that cannot be scaled ---------------------
+//
+// Written after a run against a cluster running a CloudNativePG database.
+// Its pods are owned directly by a Cluster custom resource, which has no
+// spec.replicas to scale; the old code warned and moved on, and the
+// pvc-protection finalizer then held every one of its PVCs for as long as
+// the pods lived — which, with the operator recreating them, was forever.
+
+func ownedPVCPod(ns, name string, owner metav1.OwnerReference) *corev1.Pod {
+	p := pvcPod(ns, name)
+	p.OwnerReferences = []metav1.OwnerReference{owner}
+	return p
+}
+
+func ownerRef(apiVersion, kind, name string) metav1.OwnerReference {
+	return metav1.OwnerReference{APIVersion: apiVersion, Kind: kind, Name: name}
+}
+
+func customObject(apiVersion, kind, ns, name string, owners ...metav1.OwnerReference) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{}
+	u.SetAPIVersion(apiVersion)
+	u.SetKind(kind)
+	u.SetNamespace(ns)
+	u.SetName(name)
+	u.SetOwnerReferences(owners)
+	return u
+}
+
+func TestScaleDownDeletesTheOwnerOfPodsItCannotScale(t *testing.T) {
+	sch := testScheme(t, false, true)
+	registerUnstructured(sch, schema.GroupVersionKind{Group: "postgresql.cnpg.io", Version: "v1", Kind: "ClusterList"})
+	cluster := customObject("postgresql.cnpg.io/v1", "Cluster", "kart", "nhn-postgres-cluster")
+	owner := ownerRef("postgresql.cnpg.io/v1", "Cluster", "nhn-postgres-cluster")
+	guest := fakeClient(sch, cluster,
+		ownedPVCPod("kart", "nhn-postgres-cluster-1", owner),
+		ownedPVCPod("kart", "nhn-postgres-cluster-2", owner),
+		ownedPVCPod("kart", "nhn-postgres-cluster-3", owner),
+	)
+	r, out := newTestRunner(t, nil, guest)
+
+	r.scaleDownPVCWorkloads(t.Context())
+
+	err := guest.Get(t.Context(), ctrlclient.ObjectKeyFromObject(cluster), customObject("postgresql.cnpg.io/v1", "Cluster", "", ""))
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("Get Cluster after scale-down: err = %v, want NotFound — the owner must be deleted so its operator releases the pods and PVCs", err)
+	}
+	if n := strings.Count(out.String(), "Deleting Cluster kart/nhn-postgres-cluster"); n != 1 {
+		t.Errorf("owner deletion reported %d times, want once for three pods:\n%s", n, out)
+	}
+	if strings.Contains(out.String(), "unscalable controller") {
+		t.Errorf("output still carries the old give-up warning:\n%s", out)
+	}
+	if r.failed {
+		t.Error("r.failed = true, want false when the owner was deleted")
+	}
+}
+
+// TestScaleDownDeletesTheTopOfTheOwnerChain: Strimzi's pods are owned by a
+// StrimziPodSet that is itself owned by the Kafka resource. Deleting the
+// intermediate object is useless — the top-level operator recreates it —
+// so the walk has to reach the top.
+func TestScaleDownDeletesTheTopOfTheOwnerChain(t *testing.T) {
+	sch := testScheme(t, false, true)
+	registerUnstructured(sch, schema.GroupVersionKind{Group: "core.strimzi.io", Version: "v1beta2", Kind: "StrimziPodSetList"})
+	registerUnstructured(sch, schema.GroupVersionKind{Group: "kafka.strimzi.io", Version: "v1beta2", Kind: "KafkaList"})
+	kafka := customObject("kafka.strimzi.io/v1beta2", "Kafka", "msg", "bus")
+	podset := customObject("core.strimzi.io/v1beta2", "StrimziPodSet", "msg", "bus-broker", ownerRef("kafka.strimzi.io/v1beta2", "Kafka", "bus"))
+	guest := fakeClient(sch, kafka, podset,
+		ownedPVCPod("msg", "bus-broker-0", ownerRef("core.strimzi.io/v1beta2", "StrimziPodSet", "bus-broker")),
+	)
+	r, out := newTestRunner(t, nil, guest)
+
+	r.scaleDownPVCWorkloads(t.Context())
+
+	err := guest.Get(t.Context(), ctrlclient.ObjectKeyFromObject(kafka), customObject("kafka.strimzi.io/v1beta2", "Kafka", "", ""))
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("Get Kafka after scale-down: err = %v, want NotFound — the top of the owner chain must go", err)
+	}
+	if err := guest.Get(t.Context(), ctrlclient.ObjectKeyFromObject(podset), customObject("core.strimzi.io/v1beta2", "StrimziPodSet", "", "")); err != nil {
+		t.Fatalf("the intermediate StrimziPodSet must be left to garbage collection, got err = %v", err)
+	}
+	if !strings.Contains(out.String(), "Deleting Kafka msg/bus") {
+		t.Errorf("output must name the object it deleted:\n%s", out)
+	}
+}
+
+// TestScaleDownNeverDeletesANodeOwner: a mirror pod is owned by its Node.
+// Whatever it mounts, deleting the Node object is not a workload scale-down.
+func TestScaleDownNeverDeletesANodeOwner(t *testing.T) {
+	sch := testScheme(t, false, true)
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "wrk1"}}
+	guest := fakeClient(sch, node, ownedPVCPod("kube-system", "static-wrk1", ownerRef("v1", "Node", "wrk1")))
+	r, out := newTestRunner(t, nil, guest)
+
+	r.scaleDownPVCWorkloads(t.Context())
+
+	if err := guest.Get(t.Context(), ctrlclient.ObjectKeyFromObject(node), &corev1.Node{}); err != nil {
+		t.Fatalf("Node must survive, got err = %v", err)
+	}
+	if !strings.Contains(out.String(), "WARNING") {
+		t.Errorf("a pod nothing can scale must still be warned about:\n%s", out)
+	}
+}
+
+// TestScaleDownOwnerLookupFailureBlocksVerdict: an owner that cannot be
+// read cannot be deleted, and its pods will hold their PVCs — the verdict
+// must not be clean.
+func TestScaleDownOwnerLookupFailureBlocksVerdict(t *testing.T) {
+	sch := testScheme(t, false, true)
+	registerUnstructured(sch, schema.GroupVersionKind{Group: "postgresql.cnpg.io", Version: "v1", Kind: "ClusterList"})
+	base := fakeClient(sch, ownedPVCPod("kart", "db-1", ownerRef("postgresql.cnpg.io/v1", "Cluster", "db")))
+	guest := interceptor.NewClient(base.(ctrlclient.WithWatch), interceptor.Funcs{
+		Get: func(_ context.Context, _ ctrlclient.WithWatch, _ ctrlclient.ObjectKey, _ ctrlclient.Object, _ ...ctrlclient.GetOption) error {
+			return errBoom
+		},
+	})
+	r, _ := newTestRunner(t, nil, guest)
+
+	r.scaleDownPVCWorkloads(t.Context())
+
+	if !r.failed {
+		t.Error("r.failed = false, want true when the owner of a PVC-mounting pod cannot be resolved")
+	}
+}
+
+// --- orphaned VolumeAttachments -------------------------------------------
+//
+// The same run found eight VolumeAttachments months old, each Terminating
+// with detachError "persistentvolume not found". The external-attacher
+// needs the PV to issue the detach, so with the PV gone its finalizer can
+// never be satisfied, and the detach wait can never end. Releasing them is
+// the one place preclean strips a finalizer: the volume it guarded was
+// deleted with its PV, so there is nothing left to leak.
+
+func orphanedVolumeAttachment(name, pvName string) *storagev1.VolumeAttachment {
+	now := metav1.Now()
+	va := volumeAttachment(name)
+	va.DeletionTimestamp = &now
+	va.Finalizers = []string{"external-attacher/rook-ceph-rbd-csi-ceph-com"}
+	va.Spec.Source.PersistentVolumeName = &pvName
+	va.Status.DetachError = &storagev1.VolumeError{Message: `persistentvolume "` + pvName + `" not found`}
+	return va
+}
+
+func TestDeletePVCsReleasesVolumeAttachmentsWhosePVIsGone(t *testing.T) {
+	sch := testScheme(t, false, true)
+	live := volumeAttachment("csi-live")
+	livePV := "pvc-live"
+	live.Spec.Source.PersistentVolumeName = &livePV
+	guest := fakeClient(sch, pv(livePV), live, orphanedVolumeAttachment("csi-orphan", "pvc-gone"))
+	r, out := newTestRunner(t, nil, guest)
+
+	ctx, cancel := ctxWithCancel(t)
+	cancel() // one poll of each wait
+	r.deletePVCsAndWaitVolumes(ctx)
+
+	var vas storagev1.VolumeAttachmentList
+	if err := guest.List(t.Context(), &vas); err != nil {
+		t.Fatal(err)
+	}
+	if len(vas.Items) != 1 || vas.Items[0].Name != "csi-live" {
+		t.Fatalf("remaining VolumeAttachments = %v, want only csi-live — the orphan must be released, the live one never touched", vas.Items)
+	}
+	if !strings.Contains(out.String(), "csi-orphan") || !strings.Contains(out.String(), "pvc-gone") {
+		t.Errorf("output must say which attachment was released and which PV it lacked:\n%s", out)
+	}
+}
+
+// TestDeletePVCsDoesNotReleaseOnAPVLookupError: "cannot read the PV" is not
+// "the PV is gone". A transient error must leave the finalizer alone.
+func TestDeletePVCsDoesNotReleaseOnAPVLookupError(t *testing.T) {
+	sch := testScheme(t, false, true)
+	base := fakeClient(sch, orphanedVolumeAttachment("csi-orphan", "pvc-gone"))
+	guest := interceptor.NewClient(base.(ctrlclient.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c ctrlclient.WithWatch, key ctrlclient.ObjectKey, obj ctrlclient.Object, opts ...ctrlclient.GetOption) error {
+			if _, ok := obj.(*corev1.PersistentVolume); ok {
+				return errBoom
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	r, _ := newTestRunner(t, nil, guest)
+
+	ctx, cancel := ctxWithCancel(t)
+	cancel()
+	r.deletePVCsAndWaitVolumes(ctx)
+
+	var vas storagev1.VolumeAttachmentList
+	if err := guest.List(t.Context(), &vas); err != nil {
+		t.Fatal(err)
+	}
+	if len(vas.Items) != 1 {
+		t.Fatalf("VolumeAttachments = %d, want the orphan kept while its PV cannot be read", len(vas.Items))
 	}
 }

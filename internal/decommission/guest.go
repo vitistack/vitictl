@@ -341,10 +341,63 @@ func (r *Runner) scaleDownPVCWorkloads(ctx context.Context) {
 				continue
 			}
 			r.scaleWorkloadToZero(ctx, &sts, sts.OwnerReferences)
+		case "Node":
+			// A mirror pod. Its Node is not a workload controller.
+			r.warnf("pod %s/%s uses a PVC but is owned by Node %s — cannot scale down", pod.Namespace, pod.Name, owner.Name)
 		default:
-			r.warnf("pod %s/%s uses a PVC but has unscalable controller %s/%s", pod.Namespace, pod.Name, owner.Kind, owner.Name)
+			key := pod.Namespace + "/" + owner.Kind + "/" + owner.Name
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			r.deleteTopOwner(ctx, pod, owner)
 		}
 	}
+}
+
+// ownerChainLimit bounds the walk in deleteTopOwner. Real chains are two or
+// three deep (Pod → StrimziPodSet → Kafka); anything longer is a cycle.
+const ownerChainLimit = 8
+
+// deleteTopOwner deletes the object at the top of a PVC-mounting pod's owner
+// chain when that chain does not end in a Deployment or StatefulSet.
+//
+// Written after a run against a CloudNativePG database. Its pods are owned
+// directly by a Cluster custom resource with no spec.replicas to patch, so
+// the scale-down warned and moved on. The pods kept running, the
+// pvc-protection finalizer held their PVCs, the PVs stayed bound, and the
+// VolumeAttachments stayed attached — and every wait after that timed out.
+// Deleting the pods is no answer either: the operator recreates them within
+// seconds, on the same PVCs.
+//
+// Only deleting the owner ends it. The operator then removes its own pods
+// and PVCs, exactly as it would for a user deleting the database, and the
+// evict step that follows covers anything it leaves. The walk goes to the
+// top because deleting an intermediate (a StrimziPodSet under a Kafka) is
+// undone the same way the pods were. In a decommission everything on the
+// cluster is going anyway, so there is no owner worth keeping.
+func (r *Runner) deleteTopOwner(ctx context.Context, pod *corev1.Pod, owner metav1.OwnerReference) {
+	ns := pod.Namespace
+	for depth := 0; depth < ownerChainLimit; depth++ {
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(schema.FromAPIVersionAndKind(owner.APIVersion, owner.Kind))
+		if err := r.guest.Get(ctx, ctrlclient.ObjectKey{Namespace: ns, Name: owner.Name}, u); err != nil {
+			r.failf("pod %s/%s uses a PVC but its owner %s %s/%s could not be read — its PVCs will stay held: %v", pod.Namespace, pod.Name, owner.Kind, ns, owner.Name, err)
+			return
+		}
+		if parents := u.GetOwnerReferences(); len(parents) > 0 && parents[0].Kind != "Node" {
+			owner = parents[0]
+			continue
+		}
+		r.printf("  Deleting %s %s/%s (owns pod %s and is not a scalable controller — its operator will release the pods and PVCs)", owner.Kind, ns, owner.Name, pod.Name)
+		// Background propagation: batch/v1 Jobs orphan their pods on a bare
+		// API delete, which would leave exactly the pods this is here to remove.
+		if err := ignoreNotFound(r.guest.Delete(ctx, u, ctrlclient.PropagationPolicy(metav1.DeletePropagationBackground))); err != nil {
+			r.failf("failed to delete %s %s/%s: %v", owner.Kind, ns, owner.Name, err)
+		}
+		return
+	}
+	r.failf("pod %s/%s: owner chain deeper than %d, giving up — its PVCs will stay held", pod.Namespace, pod.Name, ownerChainLimit)
 }
 
 // podEvictionGrace caps how long a PVC-mounting pod gets to shut down.
@@ -496,7 +549,17 @@ func (r *Runner) deletePVCsAndWaitVolumes(ctx context.Context) {
 		if err := r.guest.List(ctx, &l); err != nil {
 			return false, err
 		}
-		return len(l.Items) == 0, nil
+		remaining := 0
+		for i := range l.Items {
+			released, err := r.releaseOrphanedVolumeAttachment(ctx, &l.Items[i])
+			if err != nil {
+				return false, err
+			}
+			if !released {
+				remaining++
+			}
+		}
+		return remaining == 0, nil
 	})
 	r.waitUntil(ctx, "PVs cleared (external volumes deleted)", 120*time.Second, 5*time.Second, func(ctx context.Context) (bool, error) {
 		var l corev1.PersistentVolumeList
@@ -505,6 +568,45 @@ func (r *Runner) deletePVCsAndWaitVolumes(ctx context.Context) {
 		}
 		return len(l.Items) == 0, nil
 	})
+}
+
+// releaseOrphanedVolumeAttachment removes a VolumeAttachment whose PV no
+// longer exists, finalizer included, and reports whether it did.
+//
+// This is the one finalizer preclean strips, and the reason is specific. A
+// CSI external-attacher detaches by reading the PV the attachment names; when
+// the PV is gone it cannot, records detachError "persistentvolume not found",
+// and leaves its finalizer in place forever. The run this was written after
+// found eight of them, months old, and the detach wait can never end while
+// one exists. The volume the finalizer guarded was deleted together with its
+// PV, so there is nothing left for the finalizer to protect. Anything else —
+// a PV that is present, or one that merely cannot be read right now — is
+// left strictly alone.
+func (r *Runner) releaseOrphanedVolumeAttachment(ctx context.Context, va *storagev1.VolumeAttachment) (bool, error) {
+	pvName := va.Spec.Source.PersistentVolumeName
+	if pvName == nil || *pvName == "" {
+		return false, nil
+	}
+	err := r.guest.Get(ctx, ctrlclient.ObjectKey{Name: *pvName}, &corev1.PersistentVolume{})
+	if err == nil {
+		return false, nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return false, fmt.Errorf("cannot read PV %s for VolumeAttachment %s: %w", *pvName, va.Name, err)
+	}
+	detail := ""
+	if va.Status.DetachError != nil {
+		detail = " (attacher: " + va.Status.DetachError.Message + ")"
+	}
+	r.printf("  Releasing VolumeAttachment %s: its PV %s no longer exists, so the CSI attacher can never detach it%s", va.Name, *pvName, detail)
+	if err := ignoreNotFound(r.guest.Delete(ctx, va)); err != nil {
+		return false, fmt.Errorf("delete VolumeAttachment %s: %w", va.Name, err)
+	}
+	patch := []byte(`{"metadata":{"finalizers":null}}`)
+	if err := ignoreNotFound(r.guest.Patch(ctx, va, ctrlclient.RawPatch(types.MergePatchType, patch))); err != nil {
+		return false, fmt.Errorf("strip finalizers from VolumeAttachment %s: %w", va.Name, err)
+	}
+	return true, nil
 }
 
 // --- final guest verification ------------------------------------------------
