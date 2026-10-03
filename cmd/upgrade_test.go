@@ -256,3 +256,19 @@ func TestUpgradeFailedSelfCheckIsNotUpToDate(t *testing.T) {
 		}
 	}
 }
+
+// Execute prints the returned error after the command's own output, so a
+// self-check failure already shown as a warning must not come back in full a
+// second time as "❌ Error:".
+func TestUpgradeFailedSelfCheckIsReportedOnce(t *testing.T) {
+	for _, check := range []bool{false, true} {
+		out, err := runUpgradeWithoutGitHub(t, check)
+		if err == nil {
+			t.Fatalf("check=%v: error = nil, want the failed self-check", check)
+		}
+		if n := strings.Count(out+err.Error(), "rate limit"); n != 1 {
+			t.Errorf("check=%v: rate-limit message appears %d times across the warning and the returned error, want once\noutput: %q\nerror: %v",
+				check, n, out, err)
+		}
+	}
+}

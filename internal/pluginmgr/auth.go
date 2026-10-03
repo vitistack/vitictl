@@ -3,6 +3,7 @@ package pluginmgr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -139,7 +140,9 @@ func fetchRelease(ctx context.Context, repo, tag string) (*release, error) {
 // A stale GH_TOKEN left in a shell profile would otherwise break installs of
 // public plugins that need no credentials at all. If the anonymous retry also
 // fails then the resource really is out of reach, and the original
-// authentication error is the more useful one to report.
+// authentication error is the more useful one to report — unless the retry
+// never got an answer because the anonymous budget is used up. That rate
+// limit is the real obstacle and the caller can still fall back on it.
 func getWithAnonymousFallback(ctx context.Context, url, accept, repo string) ([]byte, error) {
 	body, code, status, err := getOnce(ctx, url, accept, true)
 	if err != nil {
@@ -154,6 +157,10 @@ func getWithAnonymousFallback(ctx context.Context, url, accept, repo string) ([]
 
 	authErr := describeReleaseError(code, status, repo)
 	body, retryCode, _, err := getOnce(ctx, url, accept, false)
+	var limited *pluginrelease.RateLimitError
+	if errors.As(err, &limited) {
+		return nil, err
+	}
 	if err != nil || retryCode != http.StatusOK {
 		return nil, authErr
 	}
@@ -225,6 +232,16 @@ func fetchAsset(ctx context.Context, entry *Entry, version, asset, dst string) e
 	}
 
 	rel, err := fetchRelease(ctx, entry.Repo, version)
+	var limited *pluginrelease.RateLimitError
+	if errors.As(err, &limited) {
+		// The API budget says nothing about the public download URL, which
+		// is not rate limited. Only a private repository needs the API, and
+		// for that the rate limit stays the error to report.
+		if derr := download(ctx, publicURL, dst); derr == nil {
+			return nil
+		}
+		return err
+	}
 	if err != nil {
 		return err
 	}

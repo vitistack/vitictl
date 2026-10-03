@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -53,6 +54,10 @@ signature); the plugins go through the same verified path as
 				return selfErr
 			}
 			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "⚠️  %v\n", selfErr)
+			// Execute prints whatever is returned as "❌ Error:" after the
+			// plugin output, so the full message must not be returned a
+			// second time. A short pointer keeps the non-zero exit.
+			selfErr = errors.New("could not check for updates for viti itself (see the warning above)")
 		}
 		// Unknown installs nothing, which is right for an unchecked viti.
 		status, latestTag := release.StatusUnknown, ""

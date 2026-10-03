@@ -566,3 +566,77 @@ func TestLatestVersionRateLimitSaysSo(t *testing.T) {
 		t.Fatalf("error = %v, want it to name the rate limit", err)
 	}
 }
+
+// A stale token on a host whose anonymous budget is also used up: the retry's
+// rate limit is the real obstacle, and the release page can still answer for
+// a public repository. Reporting the token rejection instead would send the
+// user off to re-authenticate for nothing.
+func TestRejectedTokenThenRateLimitStillFallsBackToTheReleasePage(t *testing.T) {
+	clearTokenEnv(t)
+	t.Setenv("GH_TOKEN", "stale-token")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/repos/") && r.Header.Get("Authorization") != "":
+			w.WriteHeader(http.StatusUnauthorized)
+		case strings.HasPrefix(r.URL.Path, "/repos/"):
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.Header().Set("X-RateLimit-Reset", "1791024730")
+			w.WriteHeader(http.StatusForbidden)
+		case r.URL.Path == "/o/r/releases/latest":
+			http.Redirect(w, r, "/o/r/releases/tag/v4.0.0", http.StatusFound)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	withAPIBase(t, srv.URL)
+	oldDL := githubDownloadBase
+	githubDownloadBase = srv.URL
+	t.Cleanup(func() { githubDownloadBase = oldDL })
+
+	got, err := LatestVersion(context.Background(), "o/r")
+	if err != nil {
+		t.Fatalf("LatestVersion() error = %v, want the release page to answer", err)
+	}
+	if got != "v4.0.0" {
+		t.Errorf("LatestVersion() = %q, want v4.0.0", got)
+	}
+}
+
+// With a token the asset goes through the releases API, but a used-up budget
+// there says nothing about the public download URL, which is not rate
+// limited. The install must try it before giving up.
+func TestRateLimitedAssetLookupFallsBackToThePublicURL(t *testing.T) {
+	clearTokenEnv(t)
+	t.Setenv("GH_TOKEN", "secret-token")
+
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", "1791024730")
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	t.Cleanup(api.Close)
+	withAPIBase(t, api.URL)
+
+	dl := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("PUBLIC-BODY"))
+	}))
+	t.Cleanup(dl.Close)
+	oldDL := githubDownloadBase
+	githubDownloadBase = dl.URL
+	t.Cleanup(func() { githubDownloadBase = oldDL })
+
+	dst := filepath.Join(t.TempDir(), "thing.tar.gz")
+	e := &Entry{Name: "x", Repo: "o/r"}
+	if err := fetchAsset(context.Background(), e, "v1.0.0", "thing.tar.gz", dst); err != nil {
+		t.Fatalf("fetchAsset() error = %v, want the public URL to be tried", err)
+	}
+	body, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "PUBLIC-BODY" {
+		t.Errorf("downloaded %q, want PUBLIC-BODY", body)
+	}
+}
