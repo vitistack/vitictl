@@ -73,14 +73,39 @@ case "$arch_raw" in
 esac
 
 # -- Resolve version ---------------------------------------------------------
+# Without a token the API allows 60 requests an hour per public address,
+# shared by every machine behind the same NAT, so GH_TOKEN/GITHUB_TOKEN is used
+# when set and the github.com release page, which is not rate limited, is the
+# fallback.
+latest_from_api() {
+  local token="${GH_TOKEN:-${GITHUB_TOKEN:-}}" config=""
+  # Passed as a curl config on stdin so the token never shows up in ps.
+  if [[ -n "$token" ]]; then
+    config="header = \"Authorization: Bearer ${token}\""
+  fi
+  printf '%s\n' "$config" \
+    | curl -fsSL -K - \
+        -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/repos/${REPO}/releases/latest" \
+    | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' \
+    | head -n1
+}
+
+# /releases/latest redirects to the newest release's tag page.
+latest_from_web() {
+  curl -fsSI "https://github.com/${REPO}/releases/latest" \
+    | sed -n 's#^location: .*/releases/tag/\([^[:space:]]*\).*#\1#Ip' \
+    | head -n1
+}
+
 if [[ -z "$VERSION" ]]; then
   log "resolving latest release"
-  VERSION=$(curl -fsSL \
-    -H "Accept: application/vnd.github+json" \
-    "https://api.github.com/repos/${REPO}/releases/latest" \
-    | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' \
-    | head -n1)
-  [[ -n "$VERSION" ]] || die "could not determine latest release tag for ${REPO}"
+  VERSION=$(latest_from_api || true)
+  if [[ -z "$VERSION" ]]; then
+    log "GitHub API unavailable (rate limited?) — resolving from the release page"
+    VERSION=$(latest_from_web || true)
+  fi
+  [[ -n "$VERSION" ]] || die "could not determine latest release tag for ${REPO}; pass --version <tag>"
 fi
 
 BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"

@@ -22,6 +22,9 @@ var (
 	upgradeCheck         bool
 )
 
+// fetchLatestRelease is a variable so tests can stand in for GitHub.
+var fetchLatestRelease = release.FetchLatest
+
 var upgradeCmd = &cobra.Command{
 	Use:   "upgrade",
 	Short: "⬆️  Upgrade viti and every installed plugin",
@@ -37,28 +40,40 @@ signature); the plugins go through the same verified path as
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		out := cmd.OutOrStdout()
-		latest, err := release.FetchLatest(cmd.Context(), release.Repo)
-		if err != nil {
-			return fmt.Errorf("could not check for updates: %w", err)
-		}
 		local := rootCmd.Version
 		_, _ = fmt.Fprintf(out, "installed: %s\n", local)
-		_, _ = fmt.Fprintf(out, "latest:    %s\n", latest.Tag)
 
-		status := release.Compare(local, latest.Tag)
-		switch status {
-		case release.StatusUpToDate:
-			_, _ = fmt.Fprintln(out, "✅ already on the latest release")
-		case release.StatusAhead:
-			_, _ = fmt.Fprintln(out, "🧪 local build is ahead of the latest release")
-		case release.StatusDevelopment:
-			_, _ = fmt.Fprintln(out, "🛠  development build — the installer switches to the latest release")
-		case release.StatusOutdated:
-			_, _ = fmt.Fprintln(out, "🆕 a newer release is available")
-		case release.StatusUnknown:
-			_, _ = fmt.Fprintf(out, "⚠️  latest release tag %q is not a version — not upgrading viti\n", latest.Tag)
+		// The plugins are looked up on their own, so a failed check of viti
+		// itself is reported and the plugins still go ahead. The command
+		// still exits non-zero at the end: viti was not checked.
+		latest, selfErr := fetchLatestRelease(cmd.Context(), release.Repo)
+		if selfErr != nil {
+			selfErr = fmt.Errorf("could not check for updates: %w", selfErr)
+			if upgradeNoPlugins {
+				return selfErr
+			}
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "⚠️  %v\n", selfErr)
 		}
-		cmdline := release.UpgradeHint()
+		// Unknown installs nothing, which is right for an unchecked viti.
+		status, latestTag := release.StatusUnknown, ""
+		if latest != nil {
+			latestTag = latest.Tag
+			_, _ = fmt.Fprintf(out, "latest:    %s\n", latestTag)
+			status = release.Compare(local, latestTag)
+			switch status {
+			case release.StatusUpToDate:
+				_, _ = fmt.Fprintln(out, "✅ already on the latest release")
+			case release.StatusAhead:
+				_, _ = fmt.Fprintln(out, "🧪 local build is ahead of the latest release")
+			case release.StatusDevelopment:
+				_, _ = fmt.Fprintln(out, "🛠  development build — the installer switches to the latest release")
+			case release.StatusOutdated:
+				_, _ = fmt.Fprintln(out, "🆕 a newer release is available")
+			case release.StatusUnknown:
+				_, _ = fmt.Fprintf(out, "⚠️  latest release tag %q is not a version — not upgrading viti\n", latestTag)
+			}
+		}
+		cmdline := release.InstallCommand(latestTag)
 		needSelf := status == release.StatusOutdated || status == release.StatusDevelopment
 		if needSelf {
 			_, _ = fmt.Fprintf(out, "   release notes: %s\n", latest.URL)
@@ -70,6 +85,7 @@ signature); the plugins go through the same verified path as
 		// is warned about rather than blocking the self-upgrade.
 		var states []*pluginmgr.State
 		if !upgradeNoPlugins {
+			var err error
 			states, err = pluginmgr.ListStates()
 			if err != nil {
 				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "⚠️  could not read installed plugins: %v\n", err)
@@ -99,7 +115,7 @@ signature); the plugins go through the same verified path as
 			if showRunHint(status, outdatedPlugins) {
 				_, _ = fmt.Fprintln(out, "   run 'viti upgrade' to upgrade everything")
 			}
-			return nil
+			return selfErr
 		}
 
 		plan := planRun(status, runtime.GOOS, upgradeNoPlugins, len(needWork))
@@ -107,12 +123,15 @@ signature); the plugins go through the same verified path as
 			if plan.windowsHint {
 				return fmt.Errorf("viti cannot replace its own running .exe — copy the installer command above into PowerShell")
 			}
+			if selfErr != nil {
+				return selfErr
+			}
 			_, _ = fmt.Fprintln(out, "✨ everything is up to date — nothing to do")
 			return nil
 		}
 
 		if !upgradeAssume {
-			ok, err := confirm(cmd, bundledPrompt(latest.Tag, plan.installer, len(needWork)))
+			ok, err := confirm(cmd, bundledPrompt(latestTag, plan.installer, len(needWork)))
 			if err != nil {
 				return err
 			}
@@ -142,7 +161,7 @@ signature); the plugins go through the same verified path as
 				return fmt.Errorf("%d plugin upgrade(s) failed", failed)
 			}
 		}
-		return nil
+		return selfErr
 	},
 }
 

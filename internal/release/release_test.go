@@ -1,6 +1,9 @@
 package release
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
 
 func TestCompare(t *testing.T) {
 	tests := []struct {
@@ -28,5 +31,25 @@ func TestCompare(t *testing.T) {
 				t.Errorf("Compare(%q, %q) = %v, want %v", tt.local, tt.latest, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestInstallCommandPinsThePlainVersion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("viti never runs the installer on Windows")
+	}
+	got := InstallCommand("v0.0.43")
+	if want := UpgradeHint() + " -s -- --version v0.0.43"; got != want {
+		t.Errorf("InstallCommand() = %q, want %q", got, want)
+	}
+}
+
+// The tag ends up on a `bash -c` command line, so anything that is not a
+// plain version is dropped rather than quoted.
+func TestInstallCommandLeavesOutAnUnsafeTag(t *testing.T) {
+	for _, tag := range []string{"", "latest", "v1.2.3; rm -rf ~", "v1.2.3 $(id)", "v1.2.3`id`"} {
+		if got := InstallCommand(tag); got != UpgradeHint() {
+			t.Errorf("InstallCommand(%q) = %q, want the unpinned hint", tag, got)
+		}
 	}
 }

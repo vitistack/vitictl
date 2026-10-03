@@ -281,11 +281,9 @@ func upgradeOne(ctx context.Context, stdout, stderr io.Writer, idx *pluginmgr.In
 		// repo recorded in state by synthesising a minimal entry.
 		entry = &pluginmgr.Entry{Name: state.Name, Repo: state.Repo}
 	}
-	// Deliberately not release.FetchLatest: that talks to GitHub anonymously,
-	// which is fine for vitictl's own public repo but returns 404 for a
-	// private plugin repo — indistinguishable from "no releases". pluginmgr
-	// owns the credentials, so the check has to go through it, exactly like
-	// the install below does.
+	// Deliberately not release.FetchLatest: pluginmgr owns the credentials
+	// and the stale-token retry, so the check goes through it exactly like
+	// the install below does and the two cannot disagree about a release.
 	latestTag, err := pluginmgr.LatestVersion(ctx, entry.Repo)
 	if err != nil {
 		return fmt.Errorf("checking %s: %w", entry.Repo, err)

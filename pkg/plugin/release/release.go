@@ -2,12 +2,16 @@
 // plugin and compares it against the locally installed build. It backs each
 // plugin's `version --check` flag and `upgrade` command.
 //
-// vitictl's own internal/release, which backs the CLI's self-update check,
-// talks to GitHub anonymously; plugins need more, because some plugin
-// repositories are private and GitHub answers unauthenticated requests for
+// Requests are authenticated whenever a token can be found. Some plugin
+// repositories are private, and GitHub answers unauthenticated requests for
 // private resources with 404 rather than 403, so an unauthenticated lookup
-// is indistinguishable from "this repository has no releases". Requests are
-// therefore authenticated whenever a token can be found.
+// is indistinguishable from "this repository has no releases". vitictl's own
+// self-update check goes through here too.
+//
+// Without a token the API allows 60 requests an hour per public address,
+// shared by every machine behind the same NAT, so a few hosts can use it up
+// between them. When that happens the lookup falls back to the github.com
+// release page, which is not rate limited but only sees public repositories.
 package release
 
 import (
@@ -32,9 +36,12 @@ const DefaultTimeout = 5 * time.Second
 // maxBody caps the response we are willing to read from GitHub.
 const maxBody = 1 << 20
 
-// githubAPIBase is a variable rather than a constant so tests can point it
-// at a local server.
-var githubAPIBase = "https://api.github.com"
+// githubAPIBase and githubWebBase are variables rather than constants so
+// tests can point them at a local server.
+var (
+	githubAPIBase = "https://api.github.com"
+	githubWebBase = "https://github.com"
+)
 
 // Latest describes a single GitHub release entry.
 type Latest struct {
@@ -75,7 +82,21 @@ func FetchLatest(ctx context.Context, repo string) (*Latest, error) {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, describeError(resp.StatusCode, resp.Status, repo, tok != "")
+		var apiErr error
+		if rl := RateLimited(resp, tok != ""); rl != nil {
+			apiErr = rl
+		} else {
+			apiErr = describeError(resp.StatusCode, resp.Status, repo, tok != "")
+		}
+		// A rate limit or a refused token says nothing about whether the
+		// release exists, and the release page can still answer for a public
+		// repository. A 404 is left alone: the page would only say the same.
+		if refusedOrLimited(resp.StatusCode) {
+			if out, err := LatestFromWeb(ctx, githubWebBase, repo); err == nil {
+				return out, nil
+			}
+		}
+		return nil, apiErr
 	}
 
 	var out Latest
@@ -86,6 +107,95 @@ func FetchLatest(ctx context.Context, repo string) (*Latest, error) {
 		return nil, errors.New("github API response missing tag_name")
 	}
 	return &out, nil
+}
+
+// LatestFromWeb resolves the newest release of repo from the github.com
+// release page instead of the API: /releases/latest redirects to the
+// release's tag page. That page is not subject to the API rate limit, but it
+// only sees public repositories and carries no release body. webBase is
+// "https://github.com" outside of tests.
+func LatestFromWeb(ctx context.Context, webBase, repo string) (*Latest, error) {
+	endpoint := fmt.Sprintf("%s/%s/releases/latest", strings.TrimSuffix(webBase, "/"), repo)
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	// The redirect is the answer, so it must not be followed.
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	_ = resp.Body.Close()
+
+	loc, err := resp.Location()
+	if err != nil {
+		return nil, fmt.Errorf("%s returned %s without a redirect to a release", endpoint, resp.Status)
+	}
+	// A repository without releases redirects to the bare /releases page.
+	_, tag, ok := strings.Cut(loc.Path, "/releases/tag/")
+	if !ok || tag == "" {
+		return nil, fmt.Errorf("%s did not redirect to a release (got %s)", endpoint, loc)
+	}
+	return &Latest{Tag: tag, Name: tag, URL: loc.String()}, nil
+}
+
+// RateLimitError reports that GitHub refused a request because the caller's
+// API rate limit is used up, as opposed to refusing access.
+type RateLimitError struct {
+	// Reset is when GitHub accepts requests again; zero when it did not say.
+	Reset time.Time
+	// Authenticated is true when the refused request carried a token.
+	Authenticated bool
+}
+
+func (e *RateLimitError) Error() string {
+	var b strings.Builder
+	if e.Authenticated {
+		b.WriteString("github API rate limit for your token is used up")
+	} else {
+		b.WriteString("github API rate limit for unauthenticated requests is used up " +
+			"(60 an hour, shared by every machine behind this network address)")
+	}
+	if !e.Reset.IsZero() {
+		_, _ = fmt.Fprintf(&b, "; it resets at %s", e.Reset.Local().Format("15:04"))
+	}
+	if !e.Authenticated {
+		b.WriteString(" — set GH_TOKEN (or GITHUB_TOKEN), or run 'gh auth login', to raise the limit")
+	}
+	return b.String()
+}
+
+// RateLimited returns the rate-limit details when resp is GitHub refusing a
+// request for rate-limit reasons, or nil when it is anything else. The
+// primary limit comes back as 403 or 429 with X-RateLimit-Remaining: 0, the
+// secondary limit with a Retry-After header. A plain 403 is an access
+// problem and is left to the caller.
+func RateLimited(resp *http.Response, authenticated bool) *RateLimitError {
+	code := resp.StatusCode
+	if code != http.StatusForbidden && code != http.StatusTooManyRequests {
+		return nil
+	}
+	h := resp.Header
+	retryAfter := h.Get("Retry-After")
+	if code == http.StatusForbidden && h.Get("X-RateLimit-Remaining") != "0" && retryAfter == "" {
+		return nil
+	}
+	e := &RateLimitError{Authenticated: authenticated}
+	if secs, err := strconv.Atoi(retryAfter); err == nil && secs >= 0 {
+		e.Reset = time.Now().Add(time.Duration(secs) * time.Second)
+	} else if unix, err := strconv.ParseInt(h.Get("X-RateLimit-Reset"), 10, 64); err == nil && unix > 0 {
+		e.Reset = time.Unix(unix, 0)
+	}
+	return e
+}
+
+// refusedOrLimited reports whether code is GitHub declining to answer rather
+// than answering "not found".
+func refusedOrLimited(code int) bool {
+	return code == http.StatusUnauthorized || code == http.StatusForbidden || code == http.StatusTooManyRequests
 }
 
 // Token returns a GitHub token for authenticating release lookups, or ""

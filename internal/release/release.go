@@ -5,68 +5,27 @@ package release
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"net/http"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
-	"time"
+
+	pluginrelease "github.com/vitistack/vitictl/pkg/plugin/release"
 )
 
 // Repo is the GitHub owner/name that hosts vitictl releases.
 const Repo = "vitistack/vitictl"
 
-// DefaultTimeout bounds the GitHub API lookup so `viti version --check`
-// cannot hang a user's terminal on a slow network.
-const DefaultTimeout = 5 * time.Second
-
 // Latest describes a single GitHub release entry.
-type Latest struct {
-	Tag  string `json:"tag_name"`
-	Name string `json:"name"`
-	URL  string `json:"html_url"`
-	Body string `json:"body"`
-}
+type Latest = pluginrelease.Latest
 
-// FetchLatest queries the GitHub releases API for the newest published
-// release of repo (expected to be "owner/name"). A non-200 response or a
-// network error is returned as-is so callers can surface a concise
-// message.
+// FetchLatest returns the newest published release of repo (expected to be
+// "owner/name"). It shares the plugins' lookup, so it authenticates with the
+// same token they use and survives GitHub's anonymous rate limit by falling
+// back to the release page.
 func FetchLatest(ctx context.Context, repo string) (*Latest, error) {
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, DefaultTimeout)
-		defer cancel()
-	}
-
-	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("github API returned %s", resp.Status)
-	}
-
-	var out Latest
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("decoding GitHub response: %w", err)
-	}
-	if out.Tag == "" {
-		return nil, errors.New("github API response missing tag_name")
-	}
-	return &out, nil
+	return pluginrelease.FetchLatest(ctx, repo)
 }
 
 // Status classifies the result of comparing a local version against the
@@ -199,6 +158,22 @@ func UpgradeHint() string {
 			Repo,
 		)
 	}
+}
+
+// installableTag matches the release tags InstallCommand will put on a shell
+// command line.
+var installableTag = regexp.MustCompile(`^v?[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*$`)
+
+// InstallCommand is UpgradeHint pinned to tag. Without the pin the installer
+// looks the latest release up again, which is one more request against
+// GitHub's API rate limit. A tag that is not a plain version is left out
+// rather than spliced into a shell command line, and Windows keeps the plain
+// hint because viti never runs the installer there.
+func InstallCommand(tag string) string {
+	if runtime.GOOS == "windows" || !installableTag.MatchString(tag) {
+		return UpgradeHint()
+	}
+	return fmt.Sprintf("%s -s -- --version %s", UpgradeHint(), tag)
 }
 
 // ReleasesURL returns the human-readable releases page for Repo.

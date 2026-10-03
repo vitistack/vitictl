@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	pluginrelease "github.com/vitistack/vitictl/pkg/plugin/release"
 )
 
 // githubAPIBase and githubDownloadBase are variables rather than constants
@@ -170,6 +172,9 @@ func getOnce(ctx context.Context, url, accept string, authorize bool) ([]byte, i
 		return nil, 0, "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if rl := pluginrelease.RateLimited(resp, req.Header.Get("Authorization") != ""); rl != nil {
+		return nil, resp.StatusCode, resp.Status, rl
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, resp.StatusCode, resp.Status, nil
 	}

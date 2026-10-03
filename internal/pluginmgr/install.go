@@ -16,6 +16,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	pluginrelease "github.com/vitistack/vitictl/pkg/plugin/release"
 )
 
 // InstallOptions controls how Install fetches and installs a plugin
@@ -198,6 +200,15 @@ func Uninstall(state *State) error {
 // a token is available so private repositories resolve too.
 func LatestVersion(ctx context.Context, repo string) (string, error) {
 	rel, err := fetchRelease(ctx, repo, "")
+	var limited *pluginrelease.RateLimitError
+	if errors.As(err, &limited) {
+		// A public plugin is still resolvable from its release page, and
+		// without a token its assets download from there too, so a used-up
+		// API budget need not stop an install or upgrade.
+		if web, werr := pluginrelease.LatestFromWeb(ctx, githubDownloadBase, repo); werr == nil {
+			return web.Tag, nil
+		}
+	}
 	if err != nil {
 		return "", err
 	}

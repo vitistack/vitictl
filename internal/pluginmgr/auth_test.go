@@ -517,3 +517,52 @@ func TestFetchIndexReportsAFailureWhenBothAttemptsFail(t *testing.T) {
 		t.Fatal("FetchIndex() = nil error when the index is unreachable, want one")
 	}
 }
+
+// rateLimitedGitHub answers the API with a used-up anonymous budget and the
+// release page with a redirect to tag, or a 404 when tag is "".
+func rateLimitedGitHub(t *testing.T, tag string) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/repos/") {
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.Header().Set("X-RateLimit-Reset", "1791024730")
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		if tag == "" || r.URL.Path != "/o/r/releases/latest" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		http.Redirect(w, r, "/o/r/releases/tag/"+tag, http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+	withAPIBase(t, srv.URL)
+	old := githubDownloadBase
+	githubDownloadBase = srv.URL
+	t.Cleanup(func() { githubDownloadBase = old })
+}
+
+func TestLatestVersionFallsBackToTheReleasePageWhenRateLimited(t *testing.T) {
+	clearTokenEnv(t)
+	rateLimitedGitHub(t, "v3.1.0")
+
+	got, err := LatestVersion(context.Background(), "o/r")
+	if err != nil {
+		t.Fatalf("LatestVersion() error = %v", err)
+	}
+	if got != "v3.1.0" {
+		t.Errorf("LatestVersion() = %q, want v3.1.0", got)
+	}
+}
+
+// Without the release page to fall back on (a private repository) the rate
+// limit has to be named — a bare 403 reads as an access problem.
+func TestLatestVersionRateLimitSaysSo(t *testing.T) {
+	clearTokenEnv(t)
+	rateLimitedGitHub(t, "")
+
+	_, err := LatestVersion(context.Background(), "o/r")
+	if err == nil || !strings.Contains(err.Error(), "rate limit") {
+		t.Fatalf("error = %v, want it to name the rate limit", err)
+	}
+}

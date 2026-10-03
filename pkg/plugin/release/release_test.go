@@ -2,10 +2,13 @@ package release
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // withAPI points the package at a local server and blanks every credential
@@ -15,9 +18,11 @@ func withAPI(t *testing.T, h http.HandlerFunc) {
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 
-	old := githubAPIBase
-	githubAPIBase = srv.URL
-	t.Cleanup(func() { githubAPIBase = old })
+	// The release-page fallback goes to the same server, so a test can never
+	// reach the real github.com.
+	oldAPI, oldWeb := githubAPIBase, githubWebBase
+	githubAPIBase, githubWebBase = srv.URL, srv.URL
+	t.Cleanup(func() { githubAPIBase, githubWebBase = oldAPI, oldWeb })
 
 	t.Setenv("GH_TOKEN", "")
 	t.Setenv("GITHUB_TOKEN", "")
@@ -172,6 +177,152 @@ func TestFetchLatestRejectedTokenSaysSo(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "rejected") {
 		t.Errorf("error %q should say the token was rejected", err)
+	}
+}
+
+// rateLimitedAPI answers the API like GitHub does once the hourly budget is
+// used up, and the release page with a redirect to tag (none when tag is "").
+func rateLimitedAPI(reset time.Time, tag string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/repos/") {
+			w.Header().Set("X-RateLimit-Limit", "60")
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(reset.Unix(), 10))
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
+			return
+		}
+		if r.Method != http.MethodHead || r.URL.Path != "/"+testRepo+"/releases/latest" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if tag == "" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		http.Redirect(w, r, "/"+testRepo+"/releases/tag/"+tag, http.StatusFound)
+	}
+}
+
+func TestFetchLatestFallsBackToTheReleasePageWhenRateLimited(t *testing.T) {
+	withAPI(t, rateLimitedAPI(time.Now().Add(time.Hour), "v1.4.0"))
+
+	got, err := FetchLatest(context.Background(), testRepo)
+	if err != nil {
+		t.Fatalf("FetchLatest() error = %v", err)
+	}
+	if got.Tag != "v1.4.0" {
+		t.Errorf("Tag = %q, want v1.4.0", got.Tag)
+	}
+	if !strings.HasSuffix(got.URL, "/"+testRepo+"/releases/tag/v1.4.0") {
+		t.Errorf("URL = %q, want the release's tag page", got.URL)
+	}
+}
+
+func TestFetchLatestRateLimitSaysSoWhenThePageCannotHelp(t *testing.T) {
+	reset := time.Date(2026, 10, 3, 12, 52, 0, 0, time.Local)
+	withAPI(t, rateLimitedAPI(reset, ""))
+
+	_, err := FetchLatest(context.Background(), testRepo)
+	var rl *RateLimitError
+	if !errors.As(err, &rl) {
+		t.Fatalf("error = %v, want a *RateLimitError", err)
+	}
+	if !rl.Reset.Equal(reset) {
+		t.Errorf("Reset = %v, want %v", rl.Reset, reset)
+	}
+	for _, want := range []string{"rate limit", "12:52", "GH_TOKEN"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should mention %q", err, want)
+		}
+	}
+}
+
+// A stale token on a public repository is refused by the API, but the
+// release page needs no token at all.
+func TestFetchLatestRejectedTokenFallsBackToTheReleasePage(t *testing.T) {
+	withAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/repos/") {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if r.Header.Get("Authorization") != "" {
+			t.Errorf("the release page was sent credentials")
+		}
+		http.Redirect(w, r, "/"+testRepo+"/releases/tag/v2.0.0", http.StatusFound)
+	})
+	t.Setenv("GH_TOKEN", "stale")
+
+	got, err := FetchLatest(context.Background(), testRepo)
+	if err != nil {
+		t.Fatalf("FetchLatest() error = %v", err)
+	}
+	if got.Tag != "v2.0.0" {
+		t.Errorf("Tag = %q, want v2.0.0", got.Tag)
+	}
+}
+
+// A 404 is GitHub answering, not declining to: the page would say the same.
+func TestFetchLatest404DoesNotConsultTheReleasePage(t *testing.T) {
+	var pageHits int
+	withAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/repos/") {
+			pageHits++
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	if _, err := FetchLatest(context.Background(), testRepo); err == nil {
+		t.Fatal("expected an error for a 404")
+	}
+	if pageHits != 0 {
+		t.Errorf("release page consulted %d time(s) after a 404", pageHits)
+	}
+}
+
+func TestLatestFromWebWithoutReleasesIsAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// GitHub sends /releases/latest to the bare /releases page then.
+		http.Redirect(w, r, "/"+testRepo+"/releases", http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	if got, err := LatestFromWeb(context.Background(), srv.URL, testRepo); err == nil {
+		t.Fatalf("LatestFromWeb() = %+v, want an error when there is no release", got)
+	}
+}
+
+func TestRateLimited(t *testing.T) {
+	tests := []struct {
+		name    string
+		code    int
+		headers map[string]string
+		want    bool
+	}{
+		{"primary limit", http.StatusForbidden, map[string]string{"X-RateLimit-Remaining": "0"}, true},
+		{"secondary limit", http.StatusForbidden, map[string]string{"Retry-After": "30"}, true},
+		{"429", http.StatusTooManyRequests, nil, true},
+		{"403 with budget left is access", http.StatusForbidden, map[string]string{"X-RateLimit-Remaining": "12"}, false},
+		{"bare 403 is access", http.StatusForbidden, nil, false},
+		{"not a refusal", http.StatusNotFound, map[string]string{"X-RateLimit-Remaining": "0"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := &http.Response{StatusCode: tt.code, Header: http.Header{}}
+			for k, v := range tt.headers {
+				resp.Header.Set(k, v)
+			}
+			if got := RateLimited(resp, false) != nil; got != tt.want {
+				t.Errorf("RateLimited() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRateLimitErrorWithTokenDoesNotSuggestOne(t *testing.T) {
+	msg := (&RateLimitError{Authenticated: true}).Error()
+	if strings.Contains(msg, "GH_TOKEN") {
+		t.Errorf("error %q suggests a token to someone already using one", msg)
 	}
 }
 

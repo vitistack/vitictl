@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"strings"
@@ -215,5 +216,43 @@ func TestConfirmWithNoInputAtAllIsAnError(t *testing.T) {
 	cmd, _ := stubCmd("")
 	if _, err := confirm(cmd, "Upgrade?"); err == nil {
 		t.Error("expected an error when stdin closes without an answer")
+	}
+}
+
+// runUpgradeWithoutGitHub runs `viti upgrade` against a home with no plugins
+// installed, with the self-check failing the way a used-up rate limit does.
+func runUpgradeWithoutGitHub(t *testing.T, check bool) (string, error) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	oldFetch, oldCheck, oldAssume := fetchLatestRelease, upgradeCheck, upgradeAssume
+	fetchLatestRelease = func(context.Context, string) (*release.Latest, error) {
+		return nil, errors.New("github API rate limit for unauthenticated requests is used up")
+	}
+	upgradeCheck, upgradeAssume = check, true
+	t.Cleanup(func() { fetchLatestRelease, upgradeCheck, upgradeAssume = oldFetch, oldCheck, oldAssume })
+
+	var out bytes.Buffer
+	c := &cobra.Command{}
+	c.SetOut(&out)
+	c.SetErr(&out)
+	c.SetContext(context.Background())
+	err := upgradeCmd.RunE(c, nil)
+	return out.String(), err
+}
+
+// A failed self-check must not read as success: with nothing else to do the
+// command reports it and exits non-zero, not "everything is up to date".
+func TestUpgradeFailedSelfCheckIsNotUpToDate(t *testing.T) {
+	for _, check := range []bool{false, true} {
+		out, err := runUpgradeWithoutGitHub(t, check)
+		if err == nil || !strings.Contains(err.Error(), "could not check for updates") {
+			t.Errorf("check=%v: error = %v, want the failed self-check", check, err)
+		}
+		if strings.Contains(out, "up to date") {
+			t.Errorf("check=%v: output %q claims viti is up to date", check, out)
+		}
+		if !strings.Contains(out, "rate limit") {
+			t.Errorf("check=%v: output %q should warn about the self-check before the plugins", check, out)
+		}
 	}
 }
