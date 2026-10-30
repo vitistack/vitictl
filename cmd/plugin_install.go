@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
@@ -308,9 +309,13 @@ func upgradeOne(ctx context.Context, stdout, stderr io.Writer, idx *pluginmgr.In
 	if len(conflicts) > 0 {
 		_, _ = fmt.Fprintf(stderr, "⚠️  %v\n", pluginmgr.JoinConflicts(entry.Name, conflicts))
 	}
+	prefix, note := upgradePrefix(state.BinaryPath, plugin.Find, state.Name)
+	if note != "" {
+		_, _ = fmt.Fprintf(stderr, "⚠️  %s: %s\n", state.Name, note)
+	}
 	newState, err := pluginmgr.Install(ctx, entry, pluginmgr.InstallOptions{
 		Version:     latestTag,
-		Prefix:      dirOf(state.BinaryPath),
+		Prefix:      prefix,
 		SkipAliases: len(conflicts) > 0,
 		Stderr:      stderr,
 	})
@@ -333,6 +338,30 @@ func splitNameVersion(s string) (name, version string) {
 		}
 	}
 	return s, ""
+}
+
+// upgradePrefix picks where an upgrade installs: normally the folder the
+// plugin was installed to, as recorded in its state. When that folder no
+// longer exists (a renamed home, or state copied to a new machine) recreating
+// it would put the upgrade somewhere PATH never looks, so the copy viti
+// actually runs is upgraded instead, and failing that Install's default next
+// to viti. An empty prefix means "use Install's default".
+func upgradePrefix(recorded string, find func(name string) (string, error), name string) (prefix, note string) {
+	dir := dirOf(recorded)
+	if dir == "" {
+		return "", ""
+	}
+	if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+		return dir, ""
+	}
+	if p, err := find(name); err == nil {
+		if resolved, rerr := filepath.EvalSymlinks(p); rerr == nil {
+			p = resolved
+		}
+		onPath := filepath.Dir(p)
+		return onPath, fmt.Sprintf("recorded install folder %s no longer exists; upgrading the copy in %s", dir, onPath)
+	}
+	return "", fmt.Sprintf("recorded install folder %s no longer exists; installing next to viti", dir)
 }
 
 // dirOf returns the directory component of p. Used to keep plugin
