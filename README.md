@@ -187,6 +187,21 @@ viti kc etcd-backup <name> -o ./snap.bin --copy-raw
 viti kc etcd-restore <name> --from ./snap.bin [--node <addr>] [--yes] [--skip-hash-check]
 ```
 
+### Merging a kubeconfig or talosconfig you were sent
+
+For clusters `kc login` cannot reach, such as management clusters, merge the
+file a colleague sent you. Same-named entries are **replaced**, so a
+re-fetched config heals an expired one (plain kubectl merging keeps the old
+entry). Your current context is kept, and the previous file is saved as
+`<config>.bak-<timestamp>`.
+
+```
+viti kubeconfig merge ~/Downloads/kubeconfig.yaml
+pbpaste | viti kubeconfig merge -          # straight from the clipboard
+viti talosconfig merge ./talosconfig
+viti kubeconfig merge <file> --kubeconfig ./other-config   # another target
+```
+
 ### Decommissioning a cluster (`kc delete`)
 
 `kc delete` decommissions a guest cluster in two phases. Phase 1 cleans up

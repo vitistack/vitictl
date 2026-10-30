@@ -142,6 +142,8 @@ func init() {
 	rootCmd.AddCommand(kubevirtConfigCmd)
 	rootCmd.AddCommand(proxmoxConfigCmd)
 	rootCmd.AddCommand(clusterStorageCmd)
+	rootCmd.AddCommand(kubeconfigCmd)
+	rootCmd.AddCommand(talosconfigCmd)
 
 	cobra.AddTemplateFunc("cmdLabel", cmdLabel)
 	cobra.AddTemplateFunc("cmdLabelPadding", cmdLabelPadding)
