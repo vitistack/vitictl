@@ -9,8 +9,9 @@
 #
 # Flags:
 #   --version <tag>      install a specific release (default: latest)
-#   --prefix  <dir>      install directory (default: /usr/local/bin if writable,
-#                        else $HOME/.local/bin)
+#   --prefix  <dir>      install directory (default: where viti already is on
+#                        PATH, else /usr/local/bin if writable, else
+#                        $HOME/.local/bin)
 #   --with-gui           also install the viti-gui plugin binary
 #   --skip-cosign        skip Sigstore signature verification (SHA-256 still enforced)
 #   --skip-checksum      skip SHA-256 verification (not recommended)
@@ -32,7 +33,7 @@ warn() { printf 'warning: %s\n' "$*" >&2; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 usage() {
-  sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -112,8 +113,15 @@ BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
 CHECKSUMS="viti-${VERSION}-SHA256SUMS"
 
 # -- Pick install prefix -----------------------------------------------------
+# A viti already on PATH is upgraded where it is. Installing the new binary
+# anywhere later on PATH leaves the old one running, and it keeps announcing
+# the same upgrade.
 if [[ -z "$PREFIX" ]]; then
-  if [[ -w /usr/local/bin ]] || { [[ $(id -u) -eq 0 ]] && [[ -d /usr/local/bin ]]; }; then
+  existing=$(command -v "$BINARY" 2>/dev/null || true)
+  if [[ "$existing" == /* ]] && [[ -w "$(dirname "$existing")" ]]; then
+    PREFIX=$(dirname "$existing")
+    log "found ${existing} — upgrading it in place"
+  elif [[ -w /usr/local/bin ]] || { [[ $(id -u) -eq 0 ]] && [[ -d /usr/local/bin ]]; }; then
     PREFIX=/usr/local/bin
   else
     PREFIX="$HOME/.local/bin"
@@ -197,6 +205,14 @@ case ":$PATH:" in
   *":${PREFIX}:"*) ;;
   *) warn "${PREFIX} is not on your PATH. Add it, e.g.:  export PATH=\"${PREFIX}:\$PATH\"" ;;
 esac
+
+# Another copy earlier on PATH (an explicit --prefix, or an old copy in a
+# directory this user cannot write to) would keep running instead of this one.
+hash -r
+on_path=$(command -v "$BINARY" 2>/dev/null || true)
+if [[ "$on_path" == /* ]] && ! [[ "$on_path" -ef "${PREFIX}/${BINARY}" ]]; then
+  warn "${on_path} comes first on your PATH and will keep running instead of ${PREFIX}/${BINARY}. Remove it, or re-run with --prefix $(dirname "$on_path")"
+fi
 
 "${PREFIX}/${BINARY}" --help >/dev/null 2>&1 \
   && log "run '${BINARY} --help' to get started" \
