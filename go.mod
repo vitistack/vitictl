@@ -1,6 +1,6 @@
 module github.com/vitistack/vitictl
 
-go 1.27.3
+go 1.27.4
 
 godebug default=go1.27
 
